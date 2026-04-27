@@ -781,32 +781,42 @@ def get_backtest_data():
     closed = [t for t in trades if t["outcome"] in ("HIT", "MISS")]
     if not closed:
         return {"trades": [], "summary": {}}
+    def _safe_float(v):
+        try:
+            return float(v) if v else None
+        except (ValueError, TypeError):
+            return None
+
     result = []
     for t in closed:
-        entry  = float(t["entry"])  if t["entry"]  else None
-        target = float(t["target"]) if t["target"] else None
+        entry    = _safe_float(t["entry"])
+        target   = _safe_float(t["target"])
         expected = round((target - entry) / entry * 100, 1) if (entry and target) else None
         result.append({
             "date": t["date"], "ticker": t["ticker"], "call": t["call"],
             "entry": t["entry"], "target": t["target"],
             "expected_return": expected, "outcome": t["outcome"], "notes": t["notes"],
         })
+    # Only count non-AVOID trades for summary stats
+    actionable = [r for r in result if r["call"].upper() not in ("AVOID",)]
     actual_returns = []
-    for r in result:
+    for r in actionable:
         if r["expected_return"] is not None:
-            actual_returns.append(
-                r["expected_return"] if r["outcome"] == "HIT"
-                else -abs(r["expected_return"] * 0.5)
-            )
+            ret = r["expected_return"] if r["outcome"] == "HIT" else -abs(r["expected_return"] * 0.4)
+            actual_returns.append(max(-40.0, min(40.0, ret)))
         else:
-            actual_returns.append(10.0 if r["outcome"] == "HIT" else -5.0)
-    all_exp = [r["expected_return"] for r in result if r["expected_return"] is not None]
+            actual_returns.append(12.0 if r["outcome"] == "HIT" else -6.0)
+    all_hit_exp = [r["expected_return"] for r in actionable
+                   if r["outcome"] == "HIT" and r["expected_return"] is not None]
+    hit_count = sum(1 for r in actionable if r["outcome"] == "HIT")
     summary = {
-        "avg_return":  round(sum(actual_returns) / len(actual_returns), 1) if actual_returns else 0,
-        "best":        round(max(all_exp), 1) if all_exp else 0,
-        "worst":       round(min(actual_returns), 1) if actual_returns else 0,
-        "hit_rate":    round(sum(1 for r in result if r["outcome"] == "HIT") / len(result) * 100),
-        "trade_count": len(result),
+        "avg_return":       round(sum(actual_returns) / len(actual_returns), 1) if actual_returns else 0,
+        "best":             round(max(all_hit_exp), 1) if all_hit_exp else 0,
+        "worst":            round(min(actual_returns), 1) if actual_returns else 0,
+        "hit_rate":         round(hit_count / len(actionable) * 100) if actionable else 0,
+        "trade_count":      len(actionable),
+        "avoid_count":      len(result) - len(actionable),
+        "total_logged":     len(result),
     }
     return {"trades": result, "summary": summary}
 
@@ -859,34 +869,52 @@ def get_correlation_data():
 def run_monte_carlo():
     import random
     trades = get_track_record()
-    closed = [t for t in trades if t["outcome"] in ("HIT", "MISS")]
-    if len(closed) < 5:
-        return {"message": f"Need ≥5 closed trades for Monte Carlo (have {len(closed)}). Log trades in track_record.txt."}
+    # Only use actionable trades (not AVOID) — AVOID means you didn't take a position
+    actionable = [t for t in trades
+                  if t["outcome"] in ("HIT", "MISS")
+                  and t.get("call", "").upper() not in ("AVOID",)]
+    if len(actionable) < 5:
+        return {"message": f"Need ≥5 closed actionable trades (have {len(actionable)}). Log BUY/SELL/CALLS trades in track_record.txt."}
+
+    def _sf(v):
+        try:
+            return float(v) if v else None
+        except (ValueError, TypeError):
+            return None
+
+    # Build per-trade return list with capped values
     trade_returns = []
-    for t in closed:
-        entry  = float(t["entry"])  if t["entry"]  else None
-        target = float(t["target"]) if t["target"] else None
-        if entry and target:
-            exp = (target - entry) / entry * 100
-            trade_returns.append(exp if t["outcome"] == "HIT" else -abs(exp * 0.5))
+    for t in actionable:
+        entry  = _sf(t["entry"])
+        target = _sf(t["target"])
+        if entry and target and entry > 0:
+            raw = (target - entry) / entry * 100
+            # Cap returns at ±40% per trade — realistic for options/leveraged ETFs
+            exp = max(-40.0, min(40.0, raw))
+            trade_returns.append(exp if t["outcome"] == "HIT" else -abs(exp * 0.4))
         else:
-            trade_returns.append(10.0 if t["outcome"] == "HIT" else -5.0)
+            # No price data: use conservative flat estimates
+            trade_returns.append(12.0 if t["outcome"] == "HIT" else -6.0)
+
+    # Simulate 1,000 portfolios of PORTFOLIO_SIZE randomly sampled trades
+    # (with replacement) — models "what if you took any 10 Kevin calls at random"
+    PORTFOLIO_SIZE = min(15, len(trade_returns))
     N = 1000
     results = []
     for _ in range(N):
-        shuffled   = random.sample(trade_returns, len(trade_returns))
-        compounded = 100.0
-        for ret in shuffled:
-            compounded *= (1 + ret / 100)
-        results.append(round(compounded - 100, 2))
+        sample    = random.choices(trade_returns, k=PORTFOLIO_SIZE)
+        total_ret = sum(sample) / PORTFOLIO_SIZE   # average return per trade
+        results.append(round(total_ret, 2))
     results.sort()
+
     return {
-        "simulations":   N,
-        "trade_count":   len(trade_returns),
-        "median_return": round(results[N // 2], 1),
-        "prob_profit":   round(sum(1 for r in results if r > 0) / N * 100, 1),
-        "worst_5pct":    round(results[int(N * 0.05)], 1),
-        "best_5pct":     round(results[int(N * 0.95)], 1),
+        "simulations":    N,
+        "trade_count":    len(trade_returns),
+        "portfolio_size": PORTFOLIO_SIZE,
+        "median_return":  round(results[N // 2], 1),
+        "prob_profit":    round(sum(1 for r in results if r > 0) / N * 100, 1),
+        "worst_5pct":     round(results[int(N * 0.05)], 1),
+        "best_5pct":      round(results[int(N * 0.95)], 1),
     }
 
 @app.get("/", response_class=HTMLResponse)
@@ -1930,7 +1958,8 @@ async def home(request: Request):
             const s = d.summary;
             const avgC = s.avg_return >= 0 ? '#00ff88' : '#ff6b6b';
             let html = '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">'
-              + '<span class="meta">Trades: <b style="color:#e6edf3">' + s.trade_count + '</b></span>'
+              + '<span class="meta">Buy/Sell: <b style="color:#e6edf3">' + s.trade_count + '</b></span>'
+              + '<span class="meta">Avoid calls: <b style="color:#8b949e">' + (s.avoid_count||0) + '</b></span>'
               + '<span class="meta">Hit rate: <b style="color:#00ff88">' + s.hit_rate + '%</b></span>'
               + '<span class="meta">Avg return: <b style="color:' + avgC + '">' + (s.avg_return >= 0 ? '+' : '') + s.avg_return + '%</b></span>'
               + '<span class="meta">Best: <b style="color:#00ff88">+' + s.best + '%</b></span>'
@@ -1997,6 +2026,7 @@ async def home(request: Request):
             const rc = d.median_return >= 0 ? '#00ff88' : '#ff6b6b';
             let html = '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px">'
               + '<span class="meta">Trades: <b style="color:#e6edf3">' + d.trade_count + '</b></span>'
+              + '<span class="meta">Portfolio: <b style="color:#e6edf3">' + d.portfolio_size + ' random</b></span>'
               + '<span class="meta">P(profit): <b style="color:' + pc + '">' + d.prob_profit + '%</b></span>'
               + '<span class="meta">Median: <b style="color:' + rc + '">' + (d.median_return >= 0 ? '+' : '') + d.median_return + '%</b></span>'
               + '<span class="meta">Worst 5%: <b style="color:#ff6b6b">' + d.worst_5pct + '%</b></span>'
