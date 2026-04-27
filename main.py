@@ -1432,6 +1432,35 @@ async def home(request: Request):
         </div>
       </div>
 
+      <div class="grid">
+        <div class="card">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+            <h3 style="margin:0">🧠 AI News Sentiment</h3>
+            <button class="btn-sm" onclick="loadNewsSentiment()">↻ Refresh</button>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px" id="sent-ticker-bar">
+            <button class="tr-tab active" onclick="setSentTicker('SPY')">SPY</button>
+            <button class="tr-tab" onclick="setSentTicker('QQQ')">QQQ</button>
+            <button class="tr-tab" onclick="setSentTicker('SOXL')">SOXL</button>
+            <button class="tr-tab" onclick="setSentTicker('META')">META</button>
+            <button class="tr-tab" onclick="setSentTicker('MSFT')">MSFT</button>
+            <button class="tr-tab" onclick="setSentTicker('MRVL')">MRVL</button>
+            <button class="tr-tab" onclick="setSentTicker('TSLA')">TSLA</button>
+            <button class="tr-tab" onclick="setSentTicker('NVDA')">NVDA</button>
+          </div>
+          <div id="sent-display" style="color:#8b949e;font-size:13px">Click a ticker to score its news sentiment.</div>
+        </div>
+
+        <div class="card">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+            <h3 style="margin:0">📐 RSI Zone Analysis</h3>
+            <button class="btn-sm" id="rsi-analysis-btn" onclick="loadRsiAnalysis()">Run Analysis</button>
+          </div>
+          <div class="meta" style="margin-bottom:8px;font-size:12px">Which RSI level gives Kevin the highest hit rate?</div>
+          <div id="rsi-analysis-display" style="color:#8b949e;font-size:13px">Click Run Analysis to process Kevin's closed calls.</div>
+        </div>
+      </div>
+
       <script>
         function calcPosition() {{
           const account = parseFloat(document.getElementById('ps-account').value) || 0;
@@ -2186,6 +2215,76 @@ async def home(request: Request):
           }} catch(e) {{}}
         }})();
 
+        // ── Item 7: AI News Sentiment ─────────────────────────────────────
+        let _sentTicker = 'SPY';
+
+        function setSentTicker(ticker) {{
+          _sentTicker = ticker;
+          document.querySelectorAll('#sent-ticker-bar .tr-tab').forEach(function(b) {{
+            b.classList.toggle('active', b.innerText === ticker);
+          }});
+          loadNewsSentiment();
+        }}
+
+        async function loadNewsSentiment() {{
+          const el = document.getElementById('sent-display');
+          el.innerHTML = '<span class="meta">Scoring ' + _sentTicker + ' news with Claude Haiku...</span>';
+          try {{
+            const d = await (await fetch('/news-sentiment?ticker=' + _sentTicker)).json();
+            if (d.error) {{ el.innerText = '⚠️ ' + d.error; return; }}
+            const sc = d.score || 0;
+            const dir = d.direction || 'NEUTRAL';
+            const dirColor = dir === 'BULLISH' ? '#00ff88' : dir === 'BEARISH' ? '#ff6b6b' : '#ffd700';
+            const barWidth = Math.abs(sc) * 10;
+            const barColor = sc > 0 ? '#00ff88' : sc < 0 ? '#ff6b6b' : '#ffd700';
+            el.innerHTML =
+              '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
+              + '<span style="font-size:20px;font-weight:bold;color:' + dirColor + '">'
+              + (sc >= 0 ? '+' : '') + sc + '</span>'
+              + '<span style="background:' + dirColor + ';color:#000;padding:2px 8px;'
+              + 'border-radius:8px;font-size:11px;font-weight:bold">' + dir + '</span>'
+              + '<span class="meta">(' + (d.articles||0) + ' articles · ' + (d.confidence||'') + ')</span>'
+              + '</div>'
+              + '<div style="background:#0d1117;border-radius:6px;height:8px;margin-bottom:8px;overflow:hidden">'
+              + '<div style="width:' + barWidth + '%;height:8px;background:' + barColor
+              + ';border-radius:6px;transition:width .4s"></div></div>'
+              + '<div style="font-size:12px;color:#c9d1d9;line-height:1.5">' + (d.theme||'') + '</div>';
+          }} catch(e) {{ document.getElementById('sent-display').innerText = 'Failed: ' + e; }}
+        }}
+
+        // ── Item 8: RSI Zone Analysis ─────────────────────────────────────
+        async function loadRsiAnalysis() {{
+          const el  = document.getElementById('rsi-analysis-display');
+          const btn = document.getElementById('rsi-analysis-btn');
+          el.innerHTML = '<span class="meta">Fetching RSI at time of each Kevin call via Alpaca... (~30s)</span>';
+          if (btn) {{ btn.disabled = true; btn.innerText = 'Running...'; }}
+          try {{
+            const d = await (await fetch('/rsi-analysis')).json();
+            if (d.error) {{ el.innerText = '⚠️ ' + d.error; return; }}
+            let html = '<div style="margin-bottom:8px;font-size:12px;color:#00d4ff;font-weight:bold">'
+              + (d.insight || '') + '</div>'
+              + '<div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+              + '<tr>' + ['RSI Zone','Trades','Hits','Hit Rate','Signal'].map(function(h) {{
+                  return '<th style="text-align:left;padding:3px 7px;color:#8b949e;border-bottom:1px solid #30363d">' + h + '</th>';
+                }}).join('') + '</tr>';
+            (d.summary || []).forEach(function(row) {{
+              const rc = row.hit_rate >= 50 ? '#00ff88' : row.hit_rate >= 35 ? '#ffd700' : '#ff6b6b';
+              html += '<tr>'
+                + '<td style="padding:3px 7px;color:#c9d1d9;white-space:nowrap">' + row.bucket + '</td>'
+                + '<td style="padding:3px 7px;color:#e6edf3">' + row.trades + '</td>'
+                + '<td style="padding:3px 7px;color:#00ff88">' + row.hits + '</td>'
+                + '<td style="padding:3px 7px;font-weight:bold;color:' + rc + '">' + row.hit_rate + '%</td>'
+                + '<td style="padding:3px 7px;font-size:11px">' + (row.edge||'') + '</td>'
+                + '</tr>';
+            }});
+            html += '</table></div>';
+            html += '<div class="meta" style="margin-top:6px;font-size:11px">Analysed '
+              + (d.trades_analyzed||0) + ' trades · ' + (d.no_rsi_data||0) + ' skipped (no data)</div>';
+            el.innerHTML = html;
+          }} catch(e) {{ el.innerText = 'Failed: ' + e; }}
+          finally {{ if (btn) {{ btn.disabled = false; btn.innerText = 'Run Analysis'; }} }}
+        }}
+
         // Auto-load new sections on page load
         loadRegime();
         loadTrackRecord();
@@ -2518,6 +2617,162 @@ async def monte_carlo_api():
 @app.get("/debug")
 async def debug():
     return {"reports_dir": REPORTS_DIR, "all_files": list_all_files(), "results_dir_exists": os.path.exists(RESULTS_DIR)}
+
+# ── Item 7 (Video 5): AI-scored news sentiment per ticker ─────────────────────
+
+@app.get("/news-sentiment")
+async def news_sentiment(ticker: str = "SPY"):
+    """Claude Haiku reads last 5 headlines and scores -10 (bearish) to +10 (bullish)."""
+    articles = get_ticker_news(ticker, 5)
+    if not articles:
+        return {"ticker": ticker, "error": "No news found", "score": 0, "direction": "NEUTRAL"}
+
+    headlines = "\n".join(
+        f"- {a['title']} [{a['source']}] {a['published']}"
+        for a in articles if a.get("title")
+    )
+
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    try:
+        r = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content":
+                f"Analyze these recent {ticker} news headlines and respond with ONLY valid JSON.\n\n"
+                f"Headlines:\n{headlines}\n\n"
+                f"Return this exact JSON structure:\n"
+                f'{{"score": <-10 to 10>, "direction": "<BULLISH|NEUTRAL|BEARISH>", '
+                f'"theme": "<one sentence summary>", "confidence": "<HIGH|MEDIUM|LOW>"}}'
+            }]
+        )
+        text = r.content[0].text.strip()
+        # Strip markdown code fences if present
+        import re as _re
+        md = _re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
+        if md:
+            text = md.group(1).strip()
+        sentiment = json.loads(text)
+        sentiment["ticker"]   = ticker
+        sentiment["articles"] = len(articles)
+        return sentiment
+    except Exception as e:
+        return {"ticker": ticker, "error": str(e), "score": 0, "direction": "NEUTRAL"}
+
+# ── Item 8 (Video 5): RSI-level performance analysis on Kevin's calls ─────────
+
+@app.get("/rsi-analysis")
+async def rsi_level_analysis():
+    """
+    For each closed Kevin call with an entry date, fetches RSI at time of call
+    from Alpaca, then groups by RSI level to show which zones have the best hit rate.
+    """
+    key    = os.getenv("ALPACA_API_KEY")
+    secret = os.getenv("ALPACA_SECRET_KEY")
+    if not key:
+        return {"error": "ALPACA_API_KEY not configured"}
+
+    trades  = get_track_record()
+    closed  = [t for t in trades
+               if t["outcome"] in ("HIT", "MISS")
+               and t.get("call", "").upper() not in ("AVOID",)
+               and t.get("entry") and t.get("date")]
+
+    if len(closed) < 5:
+        return {"error": f"Need ≥5 closed actionable trades (have {len(closed)})"}
+
+    def calc_rsi(closes, period=14):
+        if len(closes) < period + 1:
+            return None
+        gains = losses = 0.0
+        for i in range(1, period + 1):
+            d = closes[i] - closes[i-1]
+            if d > 0:
+                gains += d
+            else:
+                losses -= d
+        avg_gain = gains / period
+        avg_loss = losses / period
+        for i in range(period + 1, len(closes)):
+            d = closes[i] - closes[i-1]
+            g = d if d > 0 else 0
+            l = -d if d < 0 else 0
+            avg_gain = (avg_gain * (period - 1) + g) / period
+            avg_loss = (avg_loss * (period - 1) + l) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return round(100 - 100 / (1 + rs), 1)
+
+    def fetch_rsi_at_date(ticker, date_str):
+        try:
+            from datetime import timedelta
+            end   = date_str
+            start = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=80)).strftime("%Y-%m-%d")
+            r = requests.get(
+                f"https://data.alpaca.markets/v2/stocks/{ticker}/bars",
+                params={"timeframe": "1Day", "start": start, "end": end,
+                        "limit": 60, "adjustment": "split", "sort": "asc"},
+                headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                timeout=8
+            )
+            bars   = r.json().get("bars", [])
+            closes = [b["c"] for b in bars]
+            return calc_rsi(closes)
+        except Exception:
+            return None
+
+    # Bucket boundaries
+    buckets = {
+        "Oversold (<30)":    {"min": 0,   "max": 30,  "hits": 0, "total": 0},
+        "Low (30-50)":       {"min": 30,  "max": 50,  "hits": 0, "total": 0},
+        "Neutral (50-70)":   {"min": 50,  "max": 70,  "hits": 0, "total": 0},
+        "Overbought (>70)":  {"min": 70,  "max": 101, "hits": 0, "total": 0},
+    }
+    detail = []
+    no_rsi = 0
+
+    for t in closed[:60]:   # cap at 60 trades to avoid too many API calls
+        rsi = fetch_rsi_at_date(t["ticker"], t["date"])
+        if rsi is None:
+            no_rsi += 1
+            continue
+        for label, b in buckets.items():
+            if b["min"] <= rsi < b["max"]:
+                b["total"] += 1
+                if t["outcome"] == "HIT":
+                    b["hits"] += 1
+                detail.append({
+                    "date": t["date"], "ticker": t["ticker"],
+                    "call": t["call"], "outcome": t["outcome"],
+                    "rsi_at_call": rsi, "bucket": label
+                })
+                break
+
+    summary = []
+    for label, b in buckets.items():
+        if b["total"] > 0:
+            summary.append({
+                "bucket":   label,
+                "trades":   b["total"],
+                "hits":     b["hits"],
+                "hit_rate": round(b["hits"] / b["total"] * 100),
+                "edge":     "✅ Good zone" if b["hits"] / b["total"] >= 0.5
+                            else "⚠️ Risky zone"
+            })
+
+    # Find best bucket
+    best = max(summary, key=lambda x: x["hit_rate"]) if summary else None
+
+    return {
+        "summary":     summary,
+        "best_bucket": best,
+        "trades_analyzed": len(detail),
+        "no_rsi_data": no_rsi,
+        "insight": (
+            f"Kevin's calls perform best when RSI is {best['bucket']} "
+            f"({best['hit_rate']}% hit rate on {best['trades']} trades)"
+        ) if best else "Insufficient data"
+    }
 
 # ── Phase 4: Prometheus metrics for Grafana ───────────────────────────────────
 

@@ -69,11 +69,16 @@ data:
 
     echo "[autodeploy] $(date '+%Y-%m-%d %H:%M:%S') checking for updates..."
 
+    # ── Ensure curl is available ──────────────────────────────────────────
+    if ! which curl > /dev/null 2>&1; then
+      echo "[autodeploy] Installing curl..."
+      apt-get update -qq && apt-get install -y -q curl
+    fi
+
     # ── Ensure kubectl is available (cached on NFS after first download) ──
     if [ ! -f "$KUBECTL_CACHE" ]; then
       echo "[autodeploy] Downloading kubectl (one-time, cached to NFS)..."
       mkdir -p /reports/.bin
-      apt-get install -qq -y curl 2>/dev/null || true
       curl -sLo "$KUBECTL_CACHE" \
         "https://dl.k8s.io/release/v1.28.3/bin/linux/amd64/kubectl"
       chmod +x "$KUBECTL_CACHE"
@@ -82,12 +87,22 @@ data:
     export PATH="/reports/.bin:$PATH"
 
     # ── Check latest GitHub commit ────────────────────────────────────────
-    LATEST=$(curl -sf \
-      "https://api.github.com/repos/$REPO/commits/main" | \
-      python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])" 2>/dev/null || echo "")
+    GH_RESPONSE=$(curl -s --connect-timeout 15 --max-time 30 \
+      -H "Accept: application/vnd.github.v3+json" \
+      "https://api.github.com/repos/$REPO/commits/main" 2>&1)
+    GH_STATUS=$?
+
+    if [ $GH_STATUS -ne 0 ]; then
+      echo "[autodeploy] WARNING: curl failed (exit $GH_STATUS) — skipping"
+      exit 0
+    fi
+
+    LATEST=$(echo "$GH_RESPONSE" | \
+      python3 -c "import json,sys; d=json.load(sys.stdin); print(d['sha'])" 2>/dev/null || echo "")
 
     if [ -z "$LATEST" ]; then
-      echo "[autodeploy] WARNING: Could not reach GitHub API — skipping"
+      # Show first 200 chars of API response to diagnose the problem
+      echo "[autodeploy] WARNING: Could not parse SHA from: $(echo $GH_RESPONSE | head -c 200)"
       exit 0
     fi
 
