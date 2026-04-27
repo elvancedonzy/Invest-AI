@@ -1123,7 +1123,7 @@ async def home(request: Request):
         *{{box-sizing:border-box;margin:0;padding:0}}
         html{{scroll-behavior:smooth}}
         body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
-              max-width:960px;margin:0 auto;padding:15px;background:#0d1117;color:#e6edf3;
+              margin:0;padding:15px clamp(12px,2.5vw,36px);background:#0d1117;color:#e6edf3;
               background-image:radial-gradient(ellipse at 10% 10%,rgba(0,212,255,.04) 0%,transparent 50%),
                                radial-gradient(ellipse at 90% 90%,rgba(179,136,255,.04) 0%,transparent 50%)}}
         /* ── Typography ─────────────────────────────── */
@@ -1157,6 +1157,14 @@ async def home(request: Request):
         button:active{{transform:scale(.97)}}
         /* ── Utility ────────────────────────────────── */
         .meta{{color:#8b949e;font-size:13px}}
+        /* ── Responsive dashboard grid ──────────────── */
+        .dash{{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}}
+        .dash>.full{{grid-column:1/-1}}
+        .dash>.card,.dash>.full{{margin:0}}
+        @media(min-width:1500px){{
+          .dash{{grid-template-columns:1fr 1fr 1fr}}
+          .dash>.full{{grid-column:1/-1}}
+        }}
         /* ── Secondary small button (does NOT inherit 100% width) ── */
         .btn-sm{{width:auto!important;margin:0;padding:5px 14px;font-size:12px;
                  background:#161b22;color:#8b949e;border:1px solid #30363d;
@@ -1218,6 +1226,10 @@ async def home(request: Request):
         ::-webkit-scrollbar-thumb{{background:#30363d;border-radius:2px}}
         ::-webkit-scrollbar-thumb:hover{{background:#00d4ff}}
         /* ── Mobile ─────────────────────────────────── */
+        @media(max-width:700px){{
+          .dash{{grid-template-columns:1fr;gap:10px}}
+          .dash>.full{{grid-column:1}}
+        }}
         @media(max-width:600px){{
           body{{padding:10px;padding-bottom:72px}}
           .card{{padding:14px;margin:8px 0;border-radius:10px}}
@@ -1250,7 +1262,9 @@ async def home(request: Request):
         <div id="historyContent" style="font-size:12px;color:#8b949e;max-height:250px;overflow-y:auto"></div>
       </div>
 
-      <div class="card">
+      <div class="dash">
+
+      <div class="card full">
         {profile_bar}
         <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:8px">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -1269,7 +1283,7 @@ async def home(request: Request):
         <div style="margin-top:12px">{price_html or '<span class="meta">Live prices loading...</span>'}</div>
       </div>
 
-      <div class="card">
+      <div class="card full">
         <h3>📊 Kevin's Track Record <button class="help-btn" onclick="showHelp('track-record')">?</button></h3>
         {track_html}
       </div>
@@ -1314,8 +1328,7 @@ async def home(request: Request):
         </div>
       </div>
 
-      <div class="grid">
-        <div class="card">
+      <div class="card">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
             <h3 style="margin:0">🤖 Ask Claude <button class="help-btn" onclick="showHelp('ask-claude')">?</button></h3>
             <button class="btn-sm" id="model-toggle" onclick="toggleAskModel()" title="Toggle Quality/Economy mode">⚡ Quality</button>
@@ -1338,7 +1351,6 @@ async def home(request: Request):
           </div>
           <div class="analysis" id="analysisText">{analysis_html}</div>
         </div>
-      </div>
 
       <div class="card">
         <h3>📰 Ticker News <button class="help-btn" onclick="showHelp('news')">?</button></h3>
@@ -1388,7 +1400,7 @@ async def home(request: Request):
         <div id="opt-table" class="scroll-x" style="font-size:12px;color:#8b949e">Enter a ticker and click Load.</div>
       </div>
 
-      <div class="card">
+      <div class="card full">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
           <h3 style="margin:0">🌡️ Market Regime <button class="help-btn" onclick="showHelp('regime')">?</button></h3>
           <button class="btn-sm" onclick="loadRegime()">↻ Refresh</button>
@@ -1409,8 +1421,7 @@ async def home(request: Request):
         </div>
       </div>
 
-      <div class="grid">
-        <div class="card">
+      <div class="card">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
             <h3 style="margin:0">📊 Kevin's Call Backtest <button class="help-btn" onclick="showHelp('backtest')">?</button></h3>
             <button class="btn-sm" onclick="loadBacktest()">↻ Refresh</button>
@@ -1430,10 +1441,8 @@ async def home(request: Request):
             <div id="mc-display" style="color:#8b949e;font-size:13px">Loading...</div>
           </div>
         </div>
-      </div>
 
-      <div class="grid">
-        <div class="card">
+      <div class="card">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
             <h3 style="margin:0">🧠 AI News Sentiment</h3>
             <button class="btn-sm" onclick="loadNewsSentiment()">↻ Refresh</button>
@@ -1460,6 +1469,8 @@ async def home(request: Request):
           <div id="rsi-analysis-display" style="color:#8b949e;font-size:13px">Click Run Analysis to process Kevin's closed calls.</div>
         </div>
       </div>
+
+      </div><!-- /dash -->
 
       <script>
         function calcPosition() {{
