@@ -211,8 +211,8 @@ def verify_call(ticker, direction, entry_str, target_str, report_date):
             return "HIT", f"+{pct}% short target hit in ~{idx+1}d"
 
     last_close = check_bars[-1]["c"]
-    pct_move   = round((last_close - entry) / entry * 100, 1) if entry else "?"
-    return "MISS", f"target not reached in {len(check_bars)}d (last ${last_close:.2f} {pct_move:+}%)"
+    pct_str    = f"{round((last_close - entry) / entry * 100, 1):+.1f}%" if entry else "?"
+    return "MISS", f"target not reached in {len(check_bars)}d (last ${last_close:.2f} {pct_str})"
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
