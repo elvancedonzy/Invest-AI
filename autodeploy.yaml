@@ -86,23 +86,23 @@ data:
     fi
     export PATH="/reports/.bin:$PATH"
 
-    # ── Check latest GitHub commit ────────────────────────────────────────
-    GH_RESPONSE=$(curl -s --connect-timeout 15 --max-time 30 \
-      -H "Accept: application/vnd.github.v3+json" \
-      "https://api.github.com/repos/$REPO/commits/main" 2>&1)
-    GH_STATUS=$?
-
-    if [ $GH_STATUS -ne 0 ]; then
-      echo "[autodeploy] WARNING: curl failed (exit $GH_STATUS) — skipping"
-      exit 0
+    # ── Check latest GitHub commit (uses token for private repo) ────────
+    if [ -n "$GITHUB_TOKEN" ]; then
+      GH_RESPONSE=$(curl -s --connect-timeout 15 --max-time 30 \
+        -H "Accept: application/vnd.github.v3+json" \
+        -H "Authorization: token $GITHUB_TOKEN" \
+        "https://api.github.com/repos/$REPO/commits/main")
+    else
+      GH_RESPONSE=$(curl -s --connect-timeout 15 --max-time 30 \
+        -H "Accept: application/vnd.github.v3+json" \
+        "https://api.github.com/repos/$REPO/commits/main")
     fi
 
     LATEST=$(echo "$GH_RESPONSE" | \
       python3 -c "import json,sys; d=json.load(sys.stdin); print(d['sha'])" 2>/dev/null || echo "")
 
     if [ -z "$LATEST" ]; then
-      # Show first 200 chars of API response to diagnose the problem
-      echo "[autodeploy] WARNING: Could not parse SHA from: $(echo $GH_RESPONSE | head -c 200)"
+      echo "[autodeploy] WARNING: Could not parse SHA. API response: $(echo "$GH_RESPONSE" | cut -c1-300)"
       exit 0
     fi
 
@@ -125,10 +125,17 @@ data:
     BASE="https://raw.githubusercontent.com/$REPO/$LATEST"
     TMP=$(mktemp -d)
 
-    curl -sf "$BASE/main.py"     -o "$TMP/main.py"     && echo "[autodeploy]   Got main.py"
-    curl -sf "$BASE/analyzer.py" -o "$TMP/analyzer.py" && echo "[autodeploy]   Got analyzer.py"
-    curl -sf "$BASE/backfill.py" -o "$TMP/backfill.py" 2>/dev/null \
-      && echo "[autodeploy]   Got backfill.py" || true
+    dl() {{
+      if [ -n "$GITHUB_TOKEN" ]; then
+        curl -sf -H "Authorization: token $GITHUB_TOKEN" "$1" -o "$2"
+      else
+        curl -sf "$1" -o "$2"
+      fi
+    }}
+
+    dl "$BASE/main.py"     "$TMP/main.py"     && echo "[autodeploy]   Got main.py"
+    dl "$BASE/analyzer.py" "$TMP/analyzer.py" && echo "[autodeploy]   Got analyzer.py"
+    dl "$BASE/backfill.py" "$TMP/backfill.py" 2>/dev/null && echo "[autodeploy]   Got backfill.py" || true
 
     # ── Update ConfigMaps ─────────────────────────────────────────────────
     kubectl create configmap api-script \
@@ -183,6 +190,12 @@ spec:
           - name: deployer
             image: python:3.11-slim
             command: ["/bin/sh", "/scripts/deploy.sh"]
+            env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: GITHUB_TOKEN
             resources:
               requests:
                 memory: "64Mi"
