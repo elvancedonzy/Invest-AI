@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fetcher-script
+  namespace: invest-ai
+data:
+  fetcher.py: |
+    import os
+    import glob
+    from datetime import datetime
+
+    SAVE_DIR = "/reports/"
+    files = glob.glob(os.path.join(SAVE_DIR, "Alpha_Report_*.txt"))
+
+    if not files:
+        print("No Alpha Reports found in /reports/")
+    else:
+        latest = max(files, key=os.path.getctime)
+        print(f"Latest report: {latest}")
+        with open(latest, "r") as f:
+            content = f.read()
+        print(f"Report length: {len(content)} characters")
+        print("Ready for Claude analysis")

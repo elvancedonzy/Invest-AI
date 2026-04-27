@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: analyzer-script
+  namespace: invest-ai
+data:
+  analyzer.py: |
+    import os, glob, json, anthropic
+    from datetime import datetime
+
+    REPORTS_DIR = "/reports/"
+    RESULTS_DIR = "/reports/results/"
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    def get_all_reports():
+        import re
+        def _date_key(f):
+            m = re.search(r'(\d+)-(\d+)-(\d{4})', os.path.basename(f))
+            return (int(m.group(3)), int(m.group(1)), int(m.group(2))) if m else (0, 0, 0)
+        files = sorted(glob.glob(os.path.join(REPORTS_DIR, "*.txt")), key=_date_key)
+        reports = []
+        for f in files:
+            with open(f, "r", errors="ignore") as fp:
+                reports.append({"name": os.path.basename(f), "content": fp.read()})
+        return reports
+
+    def get_latest_report(reports):
+        if not reports:
+            return None, None
+        latest = reports[-1]
+        return latest["name"], latest["content"]
+
+    def analyze_with_claude(reports):
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        # Build historical context from all reports
+        history_summary = ""
+        if len(reports) > 1:
+            history_lines = []
+            for r in reports[:-1]:
+                history_lines.append(f"=== {r['name']} ===\n{r['content'][:800]}\n")
+            history_summary = "\n".join(history_lines[-7:])  # Last 7 reports for context
+
+        latest_name, latest_content = get_latest_report(reports)
+
+        prompt = f"""You are an expert investment research analyst with access to weeks of Alpha Reports from Meet Kevin.
+
+HISTORICAL REPORTS (last 7 days for context):
+{history_summary}
+
+TODAY'S REPORT ({latest_name}):
+{latest_content}
+
+Analyze today's report with full historical context and provide:
+
+1. MARKET SENTIMENT: Bull/bear score, how has it changed over the past week?
+
+2. KEY ECONOMIC DATA: Important data points from today
+
+3. PATTERN ANALYSIS: What themes has Kevin been consistently bullish/bearish on over the past weeks? What changed today?
+
+4. SHORT TERM PLAYS (1-2 days): Specific actionable ideas with entry context
+
+5. MEDIUM TERM PLAYS (weeks): Stocks/sectors with historical conviction tracking
+
+6. LONG TERM HOLDS (10 years): Top picks with how long Kevin has held conviction
+
+7. STOCKS TO AVOID: Bearish calls with historical context
+
+8. OPTIONS STRATEGY: Current vol environment and specific plays
+
+9. ACCURACY CHECK: Based on past reports, which of Kevin's recent calls were right or wrong?
+
+10. TOP 3 ACTIONS: The 3 most important things to act on TODAY
+
+Be specific, actionable, and use the historical data to show conviction strength.
+Not personalized financial advice."""
+
+        r = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=3000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return r.content[0].text
+
+    def main():
+        print(f"Starting analysis at {datetime.now()}")
+        reports = get_all_reports()
+        if not reports:
+            print("No reports found")
+            return
+
+        latest_name, _ = get_latest_report(reports)
+        print(f"Found {len(reports)} reports. Latest: {latest_name}")
+
+        base = latest_name.replace(".txt", "")
+        out = os.path.join(RESULTS_DIR, f"{base}_analysis.txt")
+
+        if os.path.exists(out):
+            print(f"Already analyzed: {base}")
+            return
+
+        print(f"Analyzing with {len(reports)} reports of historical context...")
+        result = analyze_with_claude(reports)
+
+        with open(out, "w") as f:
+            f.write(f"Report: {latest_name}\n")
+            f.write(f"Reports used for context: {len(reports)}\n")
+            f.write(f"Analyzed: {datetime.now()}\n")
+            f.write("="*60 + "\n\n")
+            f.write(result)
+
+        print(result)
+        print(f"\nSaved to: {out}")
+
+    main()
