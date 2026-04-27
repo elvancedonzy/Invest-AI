@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: track-record-backfill
+  namespace: invest-ai
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      containers:
+      - name: backfill
+        image: python:3.11-slim
+        command: ["/bin/sh", "-c"]
+        args:
+        - "pip install anthropic requests -q && python /scripts/backfill.py"
+        env:
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: invest-ai-secrets
+              key: ANTHROPIC_API_KEY
+        - name: ALPACA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: invest-ai-secrets
+              key: ALPACA_API_KEY
+        - name: ALPACA_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: invest-ai-secrets
+              key: ALPACA_SECRET_KEY
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: reports
+          mountPath: /reports
+        - name: scripts
+          mountPath: /scripts
+      volumes:
+      - name: reports
+        hostPath:
+          path: /mnt/alpha-reports
+          type: Directory
+      - name: scripts
+        configMap:
+          name: backfill-script
+      restartPolicy: Never
+  backoffLimit: 1
