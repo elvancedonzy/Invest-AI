@@ -315,6 +315,8 @@ def get_track_record():
     return trades
 
 def build_track_record_html(trades):
+    """Returns stats bar + interactive scaffold only.
+    The full table is rendered client-side by loadTrackRecord() JS."""
     if not trades:
         return (
             '<div style="color:#8b949e;font-size:13px;padding:10px 0">'
@@ -325,51 +327,39 @@ def build_track_record_html(trades):
             'Example: 2026-04-07,SOXL,BUY CALLS,22.50,27.00,HIT,+18% by 4-14</span>'
             '</div>'
         )
-    closed = [t for t in trades if t["outcome"] in ("HIT", "MISS")]
-    hits   = [t for t in closed if t["outcome"] == "HIT"]
-    opens  = [t for t in trades  if t["outcome"] == "OPEN"]
+    closed   = [t for t in trades if t["outcome"] in ("HIT", "MISS")]
+    hits     = [t for t in closed  if t["outcome"] == "HIT"]
+    opens    = [t for t in trades  if t["outcome"] == "OPEN"]
     hit_rate = round(len(hits) / len(closed) * 100) if closed else 0
 
-    oc_color = {"HIT": "#00ff88", "MISS": "#ff6b6b", "OPEN": "#ffd700"}
-    oc_icon  = {"HIT": "✅", "MISS": "❌", "OPEN": "⏳"}
-
-    html = (
-        '<div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px">'
-        '<span class="meta">Tracked: <b style="color:#e6edf3">' + str(len(trades)) + '</b></span>'
+    return (
+        # ── Stats bar ────────────────────────────────────────────────────────
+        '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">'
+        '<span class="meta">Total: <b style="color:#e6edf3">' + str(len(trades)) + '</b></span>'
         '<span class="meta">Hit rate: <b style="color:#00ff88">' + str(hit_rate) + '%</b>'
-        ' <span style="color:#8b949e">(' + str(len(hits)) + '/' + str(len(closed)) + ' closed)</span></span>'
-        '<span class="meta">Open: <b style="color:#ffd700">' + str(len(opens)) + '</b></span>'
+        '<span style="color:#8b949e"> (' + str(len(hits)) + '/' + str(len(closed)) + ')</span></span>'
+        '<span class="meta">✅ <b style="color:#00ff88">' + str(len(hits)) + '</b></span>'
+        '<span class="meta">❌ <b style="color:#ff6b6b">' + str(len(closed) - len(hits)) + '</b></span>'
+        '<span class="meta">⏳ <b style="color:#ffd700">' + str(len(opens)) + '</b></span>'
         '</div>'
-        '<div class="scroll-x">'
-        '<table style="width:100%;border-collapse:collapse;font-size:12px">'
-        '<tr>'
-        + "".join(
-            '<th style="text-align:' + align + ';padding:4px 8px;color:#8b949e;border-bottom:1px solid #30363d">' + h + '</th>'
-            for h, align in [("Date","left"),("Ticker","left"),("Call","left"),
-                              ("Entry","right"),("Target","right"),("Result","center"),("Notes","left")]
-        ) +
-        '</tr>'
+        # ── Filter row ───────────────────────────────────────────────────────
+        '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
+        '<input type="text" id="tr-search" placeholder="🔍 Ticker or call…" '
+        'style="margin:0;padding:7px 10px;font-size:13px;width:160px" '
+        'oninput="filterTrackRecord()"/>'
+        '<button class="tr-tab active" id="tr-tab-all"  onclick="setTRTab(\'ALL\')">All</button>'
+        '<button class="tr-tab"        id="tr-tab-hit"  onclick="setTRTab(\'HIT\')">✅ HIT</button>'
+        '<button class="tr-tab"        id="tr-tab-miss" onclick="setTRTab(\'MISS\')">❌ MISS</button>'
+        '<button class="tr-tab"        id="tr-tab-open" onclick="setTRTab(\'OPEN\')">⏳ OPEN</button>'
+        '<span id="tr-count" class="meta" style="font-size:11px;margin-left:4px"></span>'
+        '</div>'
+        # ── Table mount point ────────────────────────────────────────────────
+        '<div id="tr-table" class="scroll-x" '
+        'style="max-height:320px;overflow-y:auto;color:#8b949e;font-size:13px">Loading…</div>'
+        '<div id="tr-show-more" style="text-align:center;margin-top:8px;display:none">'
+        '<button class="btn-sm" onclick="toggleTRAll()">Show all trades</button>'
+        '</div>'
     )
-    for t in reversed(trades):
-        oc    = t["outcome"]
-        color = oc_color.get(oc, "#8b949e")
-        icon  = oc_icon.get(oc, "")
-        html += (
-            '<tr>'
-            '<td style="padding:4px 8px;color:#8b949e">'           + t["date"]              + '</td>'
-            '<td style="padding:4px 8px;font-weight:bold;color:#00d4ff">' + t["ticker"]     + '</td>'
-            '<td style="padding:4px 8px;color:#c9d1d9">'            + t["call"]              + '</td>'
-            '<td style="padding:4px 8px;text-align:right;color:#c9d1d9">' + (t["entry"]  or "-") + '</td>'
-            '<td style="padding:4px 8px;text-align:right;color:#c9d1d9">' + (t["target"] or "-") + '</td>'
-            '<td style="padding:4px 8px;text-align:center">'
-            '<span style="background:' + color + ';color:#000;padding:2px 6px;'
-            'border-radius:8px;font-size:10px;font-weight:bold">' + icon + ' ' + oc + '</span>'
-            '</td>'
-            '<td style="padding:4px 8px;color:#8b949e">'            + (t["notes"] or "")    + '</td>'
-            '</tr>'
-        )
-    html += '</table></div>'
-    return html
 
 @app.get("/pick-profile", response_class=HTMLResponse)
 async def pick_profile():
@@ -1174,6 +1164,12 @@ async def home(request: Request):
         .btn-sm:hover,.btn-sm:active{{border-color:#00d4ff;color:#00d4ff;background:#0d1a26}}
         /* ── Section sub-divider ─────────────────────────────────── */
         .sub-divider{{border-top:1px solid #21262d;margin:12px 0;padding-top:12px}}
+        /* ── Track-record filter tabs ────────────────────────────── */
+        .tr-tab{{width:auto!important;margin:0;padding:4px 11px;font-size:11px;
+                 background:#0d1117;color:#8b949e;border:1px solid #30363d;
+                 border-radius:12px;font-weight:normal}}
+        .tr-tab:hover{{border-color:#00d4ff;color:#00d4ff}}
+        .tr-tab.active{{background:#00d4ff;color:#000;border-color:#00d4ff;font-weight:bold}}
         .grid{{display:grid;grid-template-columns:1fr 1fr;gap:15px}}
         #ans{{margin-top:12px;padding:15px;background:#0d1117;border-radius:8px;min-height:40px;
               line-height:1.7;white-space:pre-wrap;border:1px solid #30363d;font-size:14px}}
@@ -2077,8 +2073,92 @@ async def home(request: Request):
           }} catch(e) {{ document.getElementById('mc-display').innerText = 'Load failed: ' + e; }}
         }}
 
+        // ── Track Record: search + filter + pagination ────────────────
+        let _trData = null, _trTab = 'ALL', _trShowAll = false;
+
+        async function loadTrackRecord() {{
+          if (_trData) {{ filterTrackRecord(); return; }}
+          document.getElementById('tr-table').innerText = 'Loading…';
+          try {{
+            const res = await (await fetch('/track-record')).json();
+            _trData = Array.isArray(res) ? res : (res.trades || []);
+            filterTrackRecord();
+          }} catch(e) {{
+            document.getElementById('tr-table').innerText = 'Failed to load: ' + e;
+          }}
+        }}
+
+        function setTRTab(tab) {{
+          _trTab = tab; _trShowAll = false;
+          document.querySelectorAll('.tr-tab').forEach(function(b) {{ b.classList.remove('active'); }});
+          const el = document.getElementById('tr-tab-' + tab.toLowerCase());
+          if (el) el.classList.add('active');
+          filterTrackRecord();
+        }}
+
+        function toggleTRAll() {{
+          _trShowAll = !_trShowAll;
+          const btn = document.querySelector('#tr-show-more button');
+          if (btn) btn.innerText = _trShowAll ? 'Show recent 20' : 'Show all trades';
+          filterTrackRecord();
+        }}
+
+        function filterTrackRecord() {{
+          if (!_trData) {{ loadTrackRecord(); return; }}
+          const q = (document.getElementById('tr-search').value || '').toUpperCase().trim();
+          let rows = _trData.filter(function(t) {{
+            if (_trTab !== 'ALL' && (t.outcome || 'OPEN') !== _trTab) return false;
+            if (q && !t.ticker.toUpperCase().includes(q) && !(t.call||'').toUpperCase().includes(q)) return false;
+            return true;
+          }});
+          rows = rows.slice().reverse(); // newest first
+          const total  = rows.length;
+          const limit  = _trShowAll ? total : 20;
+          const shown  = rows.slice(0, limit);
+          const cntEl  = document.getElementById('tr-count');
+          const moreEl = document.getElementById('tr-show-more');
+          if (cntEl) cntEl.innerText = total + ' match' + (total !== 1 ? 'es' : '');
+          if (moreEl) {{
+            moreEl.style.display = total > 20 ? 'block' : 'none';
+            const btn = moreEl.querySelector('button');
+            if (btn) btn.innerText = _trShowAll ? 'Show recent 20' : 'Show all ' + total + ' trades';
+          }}
+          if (!shown.length) {{
+            document.getElementById('tr-table').innerHTML =
+              '<span class="meta" style="padding:10px 0;display:block">No trades match this filter.</span>';
+            return;
+          }}
+          const OC = {{'HIT':'#00ff88','MISS':'#ff6b6b','OPEN':'#ffd700'}};
+          const IC = {{'HIT':'✅','MISS':'❌','OPEN':'⏳'}};
+          let html = '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+            + '<tr>' + ['Date','Ticker','Call','Entry','Target','Result','Notes'].map(function(h) {{
+                return '<th style="text-align:left;padding:3px 7px;color:#8b949e;'
+                     + 'border-bottom:1px solid #30363d;position:sticky;top:0;background:#161b22">' + h + '</th>';
+              }}).join('') + '</tr>';
+          shown.forEach(function(t) {{
+            const oc = t.outcome || 'OPEN';
+            const c  = OC[oc] || '#8b949e';
+            html += '<tr style="border-bottom:1px solid #21262d">'
+              + '<td style="padding:4px 7px;color:#8b949e;white-space:nowrap">' + (t.date||'') + '</td>'
+              + '<td style="padding:4px 7px;font-weight:bold;color:#00d4ff">' + (t.ticker||'') + '</td>'
+              + '<td style="padding:4px 7px;color:#c9d1d9">' + (t.call||'') + '</td>'
+              + '<td style="padding:4px 7px;color:#c9d1d9">' + (t.entry  ? '$'+t.entry  : '—') + '</td>'
+              + '<td style="padding:4px 7px;color:#c9d1d9">' + (t.target ? '$'+t.target : '—') + '</td>'
+              + '<td style="padding:4px 7px"><span style="background:' + c + ';color:#000;padding:1px 6px;'
+              + 'border-radius:6px;font-size:10px;font-weight:bold">'
+              + (IC[oc]||'') + ' ' + oc + '</span></td>'
+              + '<td style="padding:4px 7px;color:#8b949e;max-width:180px;overflow:hidden;'
+              + 'text-overflow:ellipsis;white-space:nowrap" title="' + (t.notes||'').replace(/"/g,"&quot;") + '">'
+              + (t.notes||'') + '</td>'
+              + '</tr>';
+          }});
+          html += '</table>';
+          document.getElementById('tr-table').innerHTML = html;
+        }}
+
         // Auto-load new sections on page load
         loadRegime();
+        loadTrackRecord();
         loadBacktest();
         loadCorrelation();
         loadMonteCarlo();
