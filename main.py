@@ -1167,6 +1167,13 @@ async def home(request: Request):
         button:active{{transform:scale(.97)}}
         /* ── Utility ────────────────────────────────── */
         .meta{{color:#8b949e;font-size:13px}}
+        /* ── Secondary small button (does NOT inherit 100% width) ── */
+        .btn-sm{{width:auto!important;margin:0;padding:5px 14px;font-size:12px;
+                 background:#161b22;color:#8b949e;border:1px solid #30363d;
+                 border-radius:20px;font-weight:normal}}
+        .btn-sm:hover,.btn-sm:active{{border-color:#00d4ff;color:#00d4ff;background:#0d1a26}}
+        /* ── Section sub-divider ─────────────────────────────────── */
+        .sub-divider{{border-top:1px solid #21262d;margin:12px 0;padding-top:12px}}
         .grid{{display:grid;grid-template-columns:1fr 1fr;gap:15px}}
         #ans{{margin-top:12px;padding:15px;background:#0d1117;border-radius:8px;min-height:40px;
               line-height:1.7;white-space:pre-wrap;border:1px solid #30363d;font-size:14px}}
@@ -1250,8 +1257,9 @@ async def home(request: Request):
       <div class="card">
         {profile_bar}
         <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-          <div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             {session_badge}
+            <span id="regime-pill"></span>
             <button class="help-btn" onclick="showHelp('prices')">?</button>
             <span class="meta"> &nbsp;{et_time_str}</span>
           </div>
@@ -1382,39 +1390,47 @@ async def home(request: Request):
       </div>
 
       <div class="card">
-        <h3>🌡️ Market Regime <button class="help-btn" onclick="showHelp('regime')">?</button></h3>
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+          <h3 style="margin:0">🌡️ Market Regime <button class="help-btn" onclick="showHelp('regime')">?</button></h3>
+          <button class="btn-sm" onclick="loadRegime()">↻ Refresh</button>
+        </div>
         <div id="regime-loading" style="color:#8b949e;font-size:13px">Loading...</div>
         <div id="regime-display" style="display:none">
-          <div style="display:flex;align-items:flex-start;gap:14px;margin-bottom:10px">
-            <div id="regime-badge" style="font-size:22px;font-weight:bold;white-space:nowrap"></div>
-            <div style="flex:1">
-              <div class="meta" style="margin-bottom:3px">SPY <span id="regime-spy" style="color:#e6edf3"></span> &nbsp;|&nbsp; from 200MA: <span id="regime-pct200"></span></div>
-              <div class="meta" style="margin-bottom:3px">50MA: <span id="regime-ma50" style="color:#e6edf3"></span> &nbsp;|&nbsp; 200MA: <span id="regime-ma200" style="color:#e6edf3"></span></div>
-              <div class="meta">20d Ann. Volatility: <span id="regime-vol"></span></div>
+          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+            <div id="regime-badge" style="font-size:20px;font-weight:bold;white-space:nowrap"></div>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;flex:1">
+              <span class="meta">SPY <span id="regime-spy" style="color:#e6edf3;font-weight:bold"></span></span>
+              <span class="meta">vs 200MA <span id="regime-pct200"></span></span>
+              <span class="meta">50MA <span id="regime-ma50" style="color:#e6edf3"></span></span>
+              <span class="meta">200MA <span id="regime-ma200" style="color:#e6edf3"></span></span>
+              <span class="meta">Vol <span id="regime-vol"></span></span>
             </div>
           </div>
-          <div id="regime-tip" style="font-size:12px;padding:7px 10px;border-radius:6px;margin-top:4px"></div>
+          <div id="regime-tip" style="font-size:12px;padding:8px 12px;border-radius:6px"></div>
         </div>
-        <button onclick="loadRegime()" style="padding:6px 14px;font-size:12px;margin-top:8px">↻ Refresh</button>
       </div>
 
-      <div class="card">
-        <h3>📊 Kevin's Call Backtest <button class="help-btn" onclick="showHelp('backtest')">?</button></h3>
-        <div id="backtest-display" style="color:#8b949e;font-size:13px">Loading...</div>
-        <button onclick="loadBacktest()" style="padding:6px 14px;font-size:12px;margin-top:8px">↻ Refresh</button>
-      </div>
+      <div class="grid">
+        <div class="card">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+            <h3 style="margin:0">📊 Kevin's Call Backtest <button class="help-btn" onclick="showHelp('backtest')">?</button></h3>
+            <button class="btn-sm" onclick="loadBacktest()">↻ Refresh</button>
+          </div>
+          <div id="backtest-display" style="color:#8b949e;font-size:13px">Loading...</div>
+        </div>
 
-      <div class="card">
-        <h3>📡 Correlation &amp; Monte Carlo <button class="help-btn" onclick="showHelp('correlation')">?</button></h3>
-        <div style="margin-bottom:14px">
-          <div class="meta" style="margin-bottom:6px;font-weight:bold">SOXL / QQQ Rolling Correlation</div>
+        <div class="card">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+            <h3 style="margin:0">📡 Correlation &amp; Monte Carlo <button class="help-btn" onclick="showHelp('correlation')">?</button></h3>
+            <button class="btn-sm" onclick="loadCorrelation();loadMonteCarlo()">↻ Refresh</button>
+          </div>
+          <div class="meta" style="margin-bottom:5px;font-weight:bold;color:#c9d1d9">SOXL / QQQ Correlation</div>
           <div id="corr-display" style="color:#8b949e;font-size:13px">Loading...</div>
+          <div class="sub-divider">
+            <div class="meta" style="margin-bottom:5px;font-weight:bold;color:#c9d1d9">Signal Strength · Monte Carlo 1,000×</div>
+            <div id="mc-display" style="color:#8b949e;font-size:13px">Loading...</div>
+          </div>
         </div>
-        <div>
-          <div class="meta" style="margin-bottom:6px;font-weight:bold">Kevin's Signal Strength (Monte Carlo · 1,000 runs)</div>
-          <div id="mc-display" style="color:#8b949e;font-size:13px">Loading...</div>
-        </div>
-        <button onclick="loadCorrelation();loadMonteCarlo()" style="padding:6px 14px;font-size:12px;margin-top:10px">↻ Refresh</button>
       </div>
 
       <script>
@@ -1913,36 +1929,58 @@ async def home(request: Request):
         }}
 
         // ── Item 4: Market Regime ──────────────────────────────────────────
+        const _REGIME_COLORS = {{'BULL':'#00ff88','CRASH':'#ff6b6b','BEAR':'#ff9800','CHOPPY':'#ffd700','NEUTRAL':'#ffd700'}};
+        const _REGIME_TIPS = {{
+          'BULL':   ['#00ff88', '🟢 BULL — Normal sizing. Favor calls on Kevin picks.'],
+          'NEUTRAL':['#ffd700', '🟡 NEUTRAL — Standard sizing. Wait for clear signals.'],
+          'CHOPPY': ['#ffd700', '🟡 CHOPPY — Reduce position size. Avoid over-trading.'],
+          'BEAR':   ['#ff9800', '🟠 BEAR — Defensive posture. Tighten stops.'],
+          'CRASH':  ['#ff6b6b', '🔴 CRASH — Protect capital. Consider puts or cash.'],
+        }};
+
+        function _applyRegimeData(d) {{
+          const c = _REGIME_COLORS[d.regime] || '#8b949e';
+          // Pill at the very top (session bar)
+          const pill = document.getElementById('regime-pill');
+          if (pill) pill.innerHTML =
+            '<span style="background:' + c + ';color:#000;padding:2px 8px;border-radius:8px;'
+            + 'font-size:11px;font-weight:bold">' + d.icon + ' ' + d.regime + '</span>';
+          // Full card
+          const loading = document.getElementById('regime-loading');
+          const display = document.getElementById('regime-display');
+          if (!loading || !display) return;
+          loading.style.display = 'none';
+          display.style.display = 'block';
+          document.getElementById('regime-badge').innerHTML =
+            '<span style="background:' + c + ';color:#000;padding:3px 12px;border-radius:10px;font-size:14px;font-weight:bold">'
+            + d.icon + ' ' + d.regime + '</span>';
+          document.getElementById('regime-spy').innerText = '$' + d.spy;
+          const p = d.pct_from_200;
+          document.getElementById('regime-pct200').innerHTML =
+            '<span style="color:' + (p >= 0 ? '#00ff88' : '#ff6b6b') + ';font-weight:bold">'
+            + (p >= 0 ? '+' : '') + p + '%</span>';
+          document.getElementById('regime-ma50').innerText  = '$' + d.ma50;
+          document.getElementById('regime-ma200').innerText = '$' + d.ma200;
+          const vc = d.ann_vol > 35 ? '#ff6b6b' : d.ann_vol > 20 ? '#ffd700' : '#00ff88';
+          document.getElementById('regime-vol').innerHTML =
+            '<span style="color:' + vc + ';font-weight:bold">' + d.ann_vol + '%</span>';
+          const [tc, tipText] = _REGIME_TIPS[d.regime] || ['#8b949e', ''];
+          const tip = document.getElementById('regime-tip');
+          tip.style.cssText = 'background:' + tc + '22;border:1px solid ' + tc
+            + ';padding:8px 12px;border-radius:6px;font-size:12px;color:#e6edf3';
+          tip.innerText = tipText;
+        }}
+
         async function loadRegime() {{
-          document.getElementById('regime-loading').style.display = 'block';
-          document.getElementById('regime-display').style.display = 'none';
+          const loading = document.getElementById('regime-loading');
+          const display = document.getElementById('regime-display');
+          if (loading) {{ loading.style.display = 'block'; loading.innerText = 'Loading...'; }}
+          if (display) display.style.display = 'none';
           try {{
             const d = await (await fetch('/regime')).json();
-            if (d.error) {{ document.getElementById('regime-loading').innerText = '⚠️ ' + d.error; return; }}
-            document.getElementById('regime-loading').style.display = 'none';
-            document.getElementById('regime-display').style.display = 'block';
-            const colors = {{'BULL':'#00ff88','CRASH':'#ff6b6b','BEAR':'#ff9800','CHOPPY':'#ffd700','NEUTRAL':'#ffd700'}};
-            const c = colors[d.regime] || '#8b949e';
-            document.getElementById('regime-badge').innerHTML = '<span style="color:' + c + '">' + d.icon + ' ' + d.regime + '</span>';
-            document.getElementById('regime-spy').innerText = '$' + d.spy;
-            const p = d.pct_from_200;
-            document.getElementById('regime-pct200').innerHTML =
-              '<span style="color:' + (p >= 0 ? '#00ff88' : '#ff6b6b') + '">' + (p >= 0 ? '+' : '') + p + '%</span>';
-            document.getElementById('regime-ma50').innerText  = '$' + d.ma50;
-            document.getElementById('regime-ma200').innerText = '$' + d.ma200;
-            const vc = d.ann_vol > 35 ? '#ff6b6b' : d.ann_vol > 20 ? '#ffd700' : '#00ff88';
-            document.getElementById('regime-vol').innerHTML = '<span style="color:' + vc + '">' + d.ann_vol + '%</span>';
-            const tips = {{
-              'BULL':    ['background:#00ff8822;border:1px solid #00ff88', '🟢 Normal sizing. Favor calls on Kevin picks.'],
-              'NEUTRAL': ['background:#ffd70022;border:1px solid #ffd700', '🟡 Neutral. Standard sizing, wait for clear signals.'],
-              'CHOPPY':  ['background:#ffd70022;border:1px solid #ffd700', '🟡 Choppy. Reduce position size, avoid over-trading.'],
-              'BEAR':    ['background:#ff980022;border:1px solid #ff9800', '🟠 Bear market. Defensive posture, tighten stops.'],
-              'CRASH':   ['background:#ff6b6b22;border:1px solid #ff6b6b', '🔴 Crash regime. Protect capital. Consider puts or cash.'],
-            }};
-            const [tipStyle, tipText] = tips[d.regime] || ['', ''];
-            document.getElementById('regime-tip').setAttribute('style', tipStyle + ';padding:7px 10px;border-radius:6px;margin-top:4px;font-size:12px;color:#e6edf3');
-            document.getElementById('regime-tip').innerText = tipText;
-          }} catch(e) {{ document.getElementById('regime-loading').innerText = 'Load failed: ' + e; }}
+            if (d.error) {{ if (loading) loading.innerText = '⚠️ ' + d.error; return; }}
+            _applyRegimeData(d);
+          }} catch(e) {{ if (loading) loading.innerText = 'Load failed: ' + e; }}
         }}
 
         // ── Item 2: Kevin's Call Backtest ──────────────────────────────────
@@ -1965,9 +2003,9 @@ async def home(request: Request):
               + '<span class="meta">Best: <b style="color:#00ff88">+' + s.best + '%</b></span>'
               + '<span class="meta">Worst: <b style="color:#ff6b6b">' + s.worst + '%</b></span>'
               + '</div>'
-              + '<div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:11px">'
+              + '<div class="scroll-x" style="max-height:290px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">'
               + '<tr>' + ['Date','Ticker','Call','Entry','Target','Expected','Outcome'].map(function(h) {{
-                  return '<th style="text-align:left;padding:3px 6px;color:#8b949e;border-bottom:1px solid #30363d">' + h + '</th>';
+                  return '<th style="text-align:left;padding:3px 6px;color:#8b949e;border-bottom:1px solid #30363d;position:sticky;top:0;background:#161b22">' + h + '</th>';
                 }}).join('') + '</tr>';
             d.trades.forEach(function(t) {{
               const rc  = t.expected_return !== null ? (t.expected_return >= 0 ? '#00ff88' : '#ff6b6b') : '#8b949e';
