@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 import anthropic, os, glob, json, re, requests, sqlite3, subprocess, threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ── Manual analysis trigger state ──────────────────��─────────────────────────
 _trigger_lock  = threading.Lock()
@@ -722,6 +722,173 @@ class Query(BaseModel):
     question: str
     tickers: list = ["SPY", "QQQ", "SOXL", "META", "MSFT"]
 
+# ── Item 4: Market Regime (live dashboard version) ───────────────────────────
+
+def get_regime_data():
+    key    = os.getenv("ALPACA_API_KEY")
+    secret = os.getenv("ALPACA_SECRET_KEY")
+    if not key:
+        return {"error": "ALPACA not configured"}
+    try:
+        import statistics as _stats
+        start = (datetime.utcnow() - timedelta(days=320)).strftime("%Y-%m-%d")
+        r = requests.get(
+            "https://data.alpaca.markets/v2/stocks/SPY/bars",
+            params={"timeframe": "1Day", "limit": 220, "adjustment": "split",
+                    "start": start, "sort": "asc"},
+            headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+            timeout=10
+        )
+        bars = r.json().get("bars", [])
+        if len(bars) < 50:
+            return {"error": "Not enough SPY bar data"}
+        closes   = [b["c"] for b in bars]
+        ma50     = sum(closes[-50:]) / 50
+        ma200    = sum(closes[-200:]) / 200 if len(closes) >= 200 else sum(closes) / len(closes)
+        current  = closes[-1]
+        returns  = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, len(closes))]
+        daily_vol = _stats.stdev(returns[-20:]) if len(returns) >= 20 else 0
+        ann_vol   = round(daily_vol * (252 ** 0.5) * 100, 1)
+        pct_from_200 = round((current - ma200) / ma200 * 100, 2)
+        above_200 = current > ma200
+        above_50  = current > ma50
+        if not above_200 and ann_vol > 40:
+            regime, icon = "CRASH", "🔴"
+        elif not above_200 and ann_vol > 25:
+            regime, icon = "BEAR", "🔴"
+        elif not above_200:
+            regime, icon = "BEAR", "🟠"
+        elif above_200 and above_50 and ann_vol < 20:
+            regime, icon = "BULL", "🟢"
+        elif above_200 and ann_vol > 30:
+            regime, icon = "CHOPPY", "🟡"
+        else:
+            regime, icon = "NEUTRAL", "🟡"
+        return {
+            "regime": regime, "icon": icon,
+            "spy": round(current, 2),
+            "ma50": round(ma50, 2), "ma200": round(ma200, 2),
+            "pct_from_200": pct_from_200, "ann_vol": ann_vol,
+            "above_200": above_200, "above_50": above_50,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ── Item 2: Kevin's Call Backtest ─────────────────────────────────────────────
+
+def get_backtest_data():
+    trades = get_track_record()
+    closed = [t for t in trades if t["outcome"] in ("HIT", "MISS")]
+    if not closed:
+        return {"trades": [], "summary": {}}
+    result = []
+    for t in closed:
+        entry  = float(t["entry"])  if t["entry"]  else None
+        target = float(t["target"]) if t["target"] else None
+        expected = round((target - entry) / entry * 100, 1) if (entry and target) else None
+        result.append({
+            "date": t["date"], "ticker": t["ticker"], "call": t["call"],
+            "entry": t["entry"], "target": t["target"],
+            "expected_return": expected, "outcome": t["outcome"], "notes": t["notes"],
+        })
+    actual_returns = []
+    for r in result:
+        if r["expected_return"] is not None:
+            actual_returns.append(
+                r["expected_return"] if r["outcome"] == "HIT"
+                else -abs(r["expected_return"] * 0.5)
+            )
+        else:
+            actual_returns.append(10.0 if r["outcome"] == "HIT" else -5.0)
+    all_exp = [r["expected_return"] for r in result if r["expected_return"] is not None]
+    summary = {
+        "avg_return":  round(sum(actual_returns) / len(actual_returns), 1) if actual_returns else 0,
+        "best":        round(max(all_exp), 1) if all_exp else 0,
+        "worst":       round(min(actual_returns), 1) if actual_returns else 0,
+        "hit_rate":    round(sum(1 for r in result if r["outcome"] == "HIT") / len(result) * 100),
+        "trade_count": len(result),
+    }
+    return {"trades": result, "summary": summary}
+
+# ── Item 5: Correlation Break Detector ───────────────────────────────────────
+
+def get_correlation_data():
+    key    = os.getenv("ALPACA_API_KEY")
+    secret = os.getenv("ALPACA_SECRET_KEY")
+    if not key:
+        return {"error": "ALPACA not configured"}
+    try:
+        from datetime import timedelta as _td
+        start = (datetime.utcnow() - _td(days=100)).strftime("%Y-%m-%d")
+        bars_a, bars_b = [], []
+        for ticker, store in [("SOXL", bars_a), ("QQQ", bars_b)]:
+            r = requests.get(
+                f"https://data.alpaca.markets/v2/stocks/{ticker}/bars",
+                params={"timeframe": "1Day", "limit": 65, "adjustment": "split",
+                        "start": start, "sort": "asc"},
+                headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                timeout=10
+            )
+            store.extend(b["c"] for b in r.json().get("bars", []))
+        n = min(len(bars_a), len(bars_b))
+        if n < 25:
+            return {"error": "Not enough bar data (need 25 days)"}
+        a, b = bars_a[-n:], bars_b[-n:]
+
+        def pearson(x, y):
+            m = len(x)
+            mx, my = sum(x) / m, sum(y) / m
+            num = sum((x[i] - mx) * (y[i] - my) for i in range(m))
+            den = (sum((x[i] - mx) ** 2 for i in range(m)) *
+                   sum((y[i] - my) ** 2 for i in range(m))) ** 0.5
+            return num / den if den else 0
+
+        current_corr  = round(pearson(a[-20:], b[-20:]), 3)
+        baseline_corr = round(pearson(a, b), 3)
+        delta         = round(current_corr - baseline_corr, 3)
+        return {
+            "current_corr": current_corr, "baseline_corr": baseline_corr,
+            "delta": delta, "break_detected": abs(delta) > 0.25,
+            "current_days": 20, "baseline_days": n,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ── Item 6: Monte Carlo Signal Strength ───────────────────────────────────────
+
+def run_monte_carlo():
+    import random
+    trades = get_track_record()
+    closed = [t for t in trades if t["outcome"] in ("HIT", "MISS")]
+    if len(closed) < 5:
+        return {"message": f"Need ≥5 closed trades for Monte Carlo (have {len(closed)}). Log trades in track_record.txt."}
+    trade_returns = []
+    for t in closed:
+        entry  = float(t["entry"])  if t["entry"]  else None
+        target = float(t["target"]) if t["target"] else None
+        if entry and target:
+            exp = (target - entry) / entry * 100
+            trade_returns.append(exp if t["outcome"] == "HIT" else -abs(exp * 0.5))
+        else:
+            trade_returns.append(10.0 if t["outcome"] == "HIT" else -5.0)
+    N = 1000
+    results = []
+    for _ in range(N):
+        shuffled   = random.sample(trade_returns, len(trade_returns))
+        compounded = 100.0
+        for ret in shuffled:
+            compounded *= (1 + ret / 100)
+        results.append(round(compounded - 100, 2))
+    results.sort()
+    return {
+        "simulations":   N,
+        "trade_count":   len(trade_returns),
+        "median_return": round(results[N // 2], 1),
+        "prob_profit":   round(sum(1 for r in results if r > 0) / N * 100, 1),
+        "worst_5pct":    round(results[int(N * 0.05)], 1),
+        "best_5pct":     round(results[int(N * 0.95)], 1),
+    }
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     pid = current_profile_id(request)
@@ -860,6 +1027,27 @@ async def home(request: Request):
             "how": "Click any ticker badge or type a symbol and click Search. Read the headline and summary — do not click through to every article, just scan for anything surprising. Breaking news can override all technical and fundamental analysis instantly.",
             "tip": "Always check news before entering a position. A stock can look perfect on technicals and then gap down on a headline you did not see. Takes 30 seconds and can save you from a bad trade.",
             "links": [{"label": "How news moves stock prices", "url": "https://www.investopedia.com/articles/investing/060315/how-news-moves-markets.asp"}, {"label": "Understanding SEC filings", "url": "https://www.investopedia.com/terms/s/sec.asp"}]
+        },
+        "regime": {
+            "title": "Market Regime",
+            "what": "A quantitative classification of the current market environment based on SPY price data — BULL, NEUTRAL, CHOPPY, BEAR, or CRASH. Uses 50-day and 200-day moving averages plus 20-day annualized volatility.",
+            "how": "In BULL regime: normal position sizing, favor calls. In CHOPPY/NEUTRAL: reduce size, wait for clearer signals. In BEAR/CRASH: defensive, favor puts or cash, tighten stops. The analyzer CronJob injects this into every Claude analysis so regime context is always factored in.",
+            "tip": "Regime alone does not tell you what to buy — it tells you HOW to size and manage positions. Kevin's reports tell you WHAT. Combine both for better risk-adjusted trades.",
+            "links": [{"label": "Bull vs bear market", "url": "https://www.investopedia.com/terms/b/bullmarket.asp"}, {"label": "Moving averages explained", "url": "https://www.investopedia.com/terms/m/movingaverage.asp"}]
+        },
+        "backtest": {
+            "title": "Kevin's Call Backtest",
+            "what": "Every closed trade from your track_record.txt enriched with the expected return (entry → target). Calculates average return, best/worst calls, and hit rate across all logged trades.",
+            "how": "Maintain track_record.txt in your Synology alpha-reports folder. Format: date,ticker,call,entry,target,HIT/MISS,notes. The more trades you log, the more statistically meaningful the backtest becomes.",
+            "tip": "MISS trades use a conservative 50% loss estimate since exact exit prices are rarely logged. The real edge from this data is identifying which TYPES of calls Kevin gets right most often — look for patterns in the ticker column.",
+            "links": [{"label": "What is backtesting?", "url": "https://www.investopedia.com/terms/b/backtesting.asp"}, {"label": "How to keep a trade journal", "url": "https://www.investopedia.com/terms/p/papertrade.asp"}]
+        },
+        "correlation": {
+            "title": "Correlation & Monte Carlo",
+            "what": "Two risk tools. Correlation: monitors whether SOXL is moving in sync with QQQ (its normal relationship). Monte Carlo: runs 1,000 simulations of Kevin's historical calls in random order to show the range of possible outcomes.",
+            "how": "Correlation break alert fires when the 20-day rolling correlation deviates >0.25 from the 60-day baseline — meaning SOXL is behaving unusually vs tech. Monte Carlo shows P(profit), median return, and the worst 5% scenario so you understand your real risk.",
+            "tip": "A correlation break on SOXL/QQQ is often an early warning of sector rotation or a volatility event in semiconductors. When it fires, reduce SOXL position size until the correlation normalizes.",
+            "links": [{"label": "Correlation in finance", "url": "https://www.investopedia.com/terms/c/correlation.asp"}, {"label": "Monte Carlo simulation", "url": "https://www.investopedia.com/terms/m/montecarlosimulation.asp"}]
         }
     })
 
@@ -1163,6 +1351,42 @@ async def home(request: Request):
           <button onclick="loadExpirations()" style="width:90px;margin:0;padding:9px">Load</button>
         </div>
         <div id="opt-table" class="scroll-x" style="font-size:12px;color:#8b949e">Enter a ticker and click Load.</div>
+      </div>
+
+      <div class="card">
+        <h3>🌡️ Market Regime <button class="help-btn" onclick="showHelp('regime')">?</button></h3>
+        <div id="regime-loading" style="color:#8b949e;font-size:13px">Loading...</div>
+        <div id="regime-display" style="display:none">
+          <div style="display:flex;align-items:flex-start;gap:14px;margin-bottom:10px">
+            <div id="regime-badge" style="font-size:22px;font-weight:bold;white-space:nowrap"></div>
+            <div style="flex:1">
+              <div class="meta" style="margin-bottom:3px">SPY <span id="regime-spy" style="color:#e6edf3"></span> &nbsp;|&nbsp; from 200MA: <span id="regime-pct200"></span></div>
+              <div class="meta" style="margin-bottom:3px">50MA: <span id="regime-ma50" style="color:#e6edf3"></span> &nbsp;|&nbsp; 200MA: <span id="regime-ma200" style="color:#e6edf3"></span></div>
+              <div class="meta">20d Ann. Volatility: <span id="regime-vol"></span></div>
+            </div>
+          </div>
+          <div id="regime-tip" style="font-size:12px;padding:7px 10px;border-radius:6px;margin-top:4px"></div>
+        </div>
+        <button onclick="loadRegime()" style="padding:6px 14px;font-size:12px;margin-top:8px">↻ Refresh</button>
+      </div>
+
+      <div class="card">
+        <h3>📊 Kevin's Call Backtest <button class="help-btn" onclick="showHelp('backtest')">?</button></h3>
+        <div id="backtest-display" style="color:#8b949e;font-size:13px">Loading...</div>
+        <button onclick="loadBacktest()" style="padding:6px 14px;font-size:12px;margin-top:8px">↻ Refresh</button>
+      </div>
+
+      <div class="card">
+        <h3>📡 Correlation &amp; Monte Carlo <button class="help-btn" onclick="showHelp('correlation')">?</button></h3>
+        <div style="margin-bottom:14px">
+          <div class="meta" style="margin-bottom:6px;font-weight:bold">SOXL / QQQ Rolling Correlation</div>
+          <div id="corr-display" style="color:#8b949e;font-size:13px">Loading...</div>
+        </div>
+        <div>
+          <div class="meta" style="margin-bottom:6px;font-weight:bold">Kevin's Signal Strength (Monte Carlo · 1,000 runs)</div>
+          <div id="mc-display" style="color:#8b949e;font-size:13px">Loading...</div>
+        </div>
+        <button onclick="loadCorrelation();loadMonteCarlo()" style="padding:6px 14px;font-size:12px;margin-top:10px">↻ Refresh</button>
       </div>
 
       <script>
@@ -1659,6 +1883,137 @@ async def home(request: Request):
             setTimeout(function() {{ btn.innerText = orig; }}, 2000);
           }}).catch(function() {{ alert('Copy failed — select text manually'); }});
         }}
+
+        // ── Item 4: Market Regime ──────────────────────────────────────────
+        async function loadRegime() {{
+          document.getElementById('regime-loading').style.display = 'block';
+          document.getElementById('regime-display').style.display = 'none';
+          try {{
+            const d = await (await fetch('/regime')).json();
+            if (d.error) {{ document.getElementById('regime-loading').innerText = '⚠️ ' + d.error; return; }}
+            document.getElementById('regime-loading').style.display = 'none';
+            document.getElementById('regime-display').style.display = 'block';
+            const colors = {{'BULL':'#00ff88','CRASH':'#ff6b6b','BEAR':'#ff9800','CHOPPY':'#ffd700','NEUTRAL':'#ffd700'}};
+            const c = colors[d.regime] || '#8b949e';
+            document.getElementById('regime-badge').innerHTML = '<span style="color:' + c + '">' + d.icon + ' ' + d.regime + '</span>';
+            document.getElementById('regime-spy').innerText = '$' + d.spy;
+            const p = d.pct_from_200;
+            document.getElementById('regime-pct200').innerHTML =
+              '<span style="color:' + (p >= 0 ? '#00ff88' : '#ff6b6b') + '">' + (p >= 0 ? '+' : '') + p + '%</span>';
+            document.getElementById('regime-ma50').innerText  = '$' + d.ma50;
+            document.getElementById('regime-ma200').innerText = '$' + d.ma200;
+            const vc = d.ann_vol > 35 ? '#ff6b6b' : d.ann_vol > 20 ? '#ffd700' : '#00ff88';
+            document.getElementById('regime-vol').innerHTML = '<span style="color:' + vc + '">' + d.ann_vol + '%</span>';
+            const tips = {{
+              'BULL':    ['background:#00ff8822;border:1px solid #00ff88', '🟢 Normal sizing. Favor calls on Kevin\'s picks.'],
+              'NEUTRAL': ['background:#ffd70022;border:1px solid #ffd700', '🟡 Neutral. Standard sizing, wait for clear signals.'],
+              'CHOPPY':  ['background:#ffd70022;border:1px solid #ffd700', '🟡 Choppy. Reduce position size, avoid over-trading.'],
+              'BEAR':    ['background:#ff980022;border:1px solid #ff9800', '🟠 Bear market. Defensive posture, tighten stops.'],
+              'CRASH':   ['background:#ff6b6b22;border:1px solid #ff6b6b', '🔴 Crash regime. Protect capital. Consider puts or cash.'],
+            }};
+            const [tipStyle, tipText] = tips[d.regime] || ['', ''];
+            document.getElementById('regime-tip').setAttribute('style', tipStyle + ';padding:7px 10px;border-radius:6px;margin-top:4px;font-size:12px;color:#e6edf3');
+            document.getElementById('regime-tip').innerText = tipText;
+          }} catch(e) {{ document.getElementById('regime-loading').innerText = 'Load failed: ' + e; }}
+        }}
+
+        // ── Item 2: Kevin's Call Backtest ──────────────────────────────────
+        async function loadBacktest() {{
+          document.getElementById('backtest-display').innerText = 'Loading...';
+          try {{
+            const d = await (await fetch('/backtest')).json();
+            if (!d.trades || d.trades.length === 0) {{
+              document.getElementById('backtest-display').innerHTML =
+                '<span class="meta">No closed trades yet. Add HIT/MISS entries to track_record.txt on Synology.</span>';
+              return;
+            }}
+            const s = d.summary;
+            const avgC = s.avg_return >= 0 ? '#00ff88' : '#ff6b6b';
+            let html = '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">'
+              + '<span class="meta">Trades: <b style="color:#e6edf3">' + s.trade_count + '</b></span>'
+              + '<span class="meta">Hit rate: <b style="color:#00ff88">' + s.hit_rate + '%</b></span>'
+              + '<span class="meta">Avg return: <b style="color:' + avgC + '">' + (s.avg_return >= 0 ? '+' : '') + s.avg_return + '%</b></span>'
+              + '<span class="meta">Best: <b style="color:#00ff88">+' + s.best + '%</b></span>'
+              + '<span class="meta">Worst: <b style="color:#ff6b6b">' + s.worst + '%</b></span>'
+              + '</div>'
+              + '<div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:11px">'
+              + '<tr>' + ['Date','Ticker','Call','Entry','Target','Expected','Outcome'].map(function(h) {{
+                  return '<th style="text-align:left;padding:3px 6px;color:#8b949e;border-bottom:1px solid #30363d">' + h + '</th>';
+                }}).join('') + '</tr>';
+            d.trades.forEach(function(t) {{
+              const rc  = t.expected_return !== null ? (t.expected_return >= 0 ? '#00ff88' : '#ff6b6b') : '#8b949e';
+              const oc  = t.outcome === 'HIT' ? '#00ff88' : '#ff6b6b';
+              const ret = t.expected_return !== null ? ((t.expected_return >= 0 ? '+' : '') + t.expected_return + '%') : '-';
+              html += '<tr>'
+                + '<td style="padding:3px 6px;color:#8b949e">'              + t.date            + '</td>'
+                + '<td style="padding:3px 6px;color:#00d4ff;font-weight:bold">' + t.ticker     + '</td>'
+                + '<td style="padding:3px 6px;color:#c9d1d9">'              + t.call            + '</td>'
+                + '<td style="padding:3px 6px;color:#c9d1d9">$'             + (t.entry  || '-') + '</td>'
+                + '<td style="padding:3px 6px;color:#c9d1d9">$'             + (t.target || '-') + '</td>'
+                + '<td style="padding:3px 6px;color:' + rc + '">'           + ret               + '</td>'
+                + '<td style="padding:3px 6px"><span style="background:' + oc
+                +    ';color:#000;padding:1px 6px;border-radius:6px;font-size:10px;font-weight:bold">'
+                +    t.outcome + '</span></td>'
+                + '</tr>';
+            }});
+            html += '</table></div>';
+            document.getElementById('backtest-display').innerHTML = html;
+          }} catch(e) {{ document.getElementById('backtest-display').innerText = 'Load failed: ' + e; }}
+        }}
+
+        // ── Item 5: Correlation Break Detector ────────────────────────────
+        async function loadCorrelation() {{
+          document.getElementById('corr-display').innerText = 'Loading...';
+          try {{
+            const d = await (await fetch('/correlation')).json();
+            if (d.error) {{ document.getElementById('corr-display').innerText = '⚠️ ' + d.error; return; }}
+            const cc = Math.abs(d.current_corr) > 0.7 ? '#00ff88' : Math.abs(d.current_corr) > 0.4 ? '#ffd700' : '#ff6b6b';
+            const dc = d.break_detected ? '#ff6b6b' : '#00ff88';
+            let html = '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">'
+              + '<span class="meta">20-day corr: <b style="color:' + cc + '">' + d.current_corr + '</b></span>'
+              + '<span class="meta">Baseline (' + d.baseline_days + 'd): <b style="color:#e6edf3">' + d.baseline_corr + '</b></span>'
+              + '<span class="meta">Δ: <b style="color:' + dc + '">' + (d.delta >= 0 ? '+' : '') + d.delta + '</b></span>'
+              + '</div>';
+            if (d.break_detected) {{
+              html += '<div style="background:#ff6b6b22;border:1px solid #ff6b6b;border-radius:6px;'
+                   +  'padding:8px;font-size:12px;color:#ff6b6b">'
+                   +  '⚠️ Correlation break — SOXL is moving differently from QQQ. '
+                   +  'Possible sector rotation or volatility spike. Reduce SOXL size until normal.</div>';
+            }} else {{
+              html += '<div style="color:#8b949e;font-size:12px">✅ Normal — SOXL tracking QQQ as expected.</div>';
+            }}
+            document.getElementById('corr-display').innerHTML = html;
+          }} catch(e) {{ document.getElementById('corr-display').innerText = 'Load failed: ' + e; }}
+        }}
+
+        // ── Item 6: Monte Carlo Signal Strength ───────────────────────────
+        async function loadMonteCarlo() {{
+          document.getElementById('mc-display').innerText = 'Running 1,000 simulations...';
+          try {{
+            const d = await (await fetch('/monte-carlo')).json();
+            if (d.message) {{ document.getElementById('mc-display').innerHTML = '<span class="meta">' + d.message + '</span>'; return; }}
+            if (d.error)   {{ document.getElementById('mc-display').innerText = '⚠️ ' + d.error;   return; }}
+            const pc = d.prob_profit >= 70 ? '#00ff88' : d.prob_profit >= 50 ? '#ffd700' : '#ff6b6b';
+            const rc = d.median_return >= 0 ? '#00ff88' : '#ff6b6b';
+            let html = '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px">'
+              + '<span class="meta">Trades: <b style="color:#e6edf3">' + d.trade_count + '</b></span>'
+              + '<span class="meta">P(profit): <b style="color:' + pc + '">' + d.prob_profit + '%</b></span>'
+              + '<span class="meta">Median: <b style="color:' + rc + '">' + (d.median_return >= 0 ? '+' : '') + d.median_return + '%</b></span>'
+              + '<span class="meta">Worst 5%: <b style="color:#ff6b6b">' + d.worst_5pct + '%</b></span>'
+              + '<span class="meta">Best 5%: <b style="color:#00ff88">+' + d.best_5pct + '%</b></span>'
+              + '</div>';
+            const strength = d.prob_profit >= 65 ? '🟢 Strong signal' : d.prob_profit >= 50 ? '🟡 Moderate signal' : '🔴 Weak signal';
+            html += '<div style="font-size:12px;color:#8b949e">' + strength
+              + ' — Kevin\'s calls are profitable in ' + d.prob_profit + '% of simulated trade sequences.</div>';
+            document.getElementById('mc-display').innerHTML = html;
+          }} catch(e) {{ document.getElementById('mc-display').innerText = 'Load failed: ' + e; }}
+        }}
+
+        // Auto-load new sections on page load
+        loadRegime();
+        loadBacktest();
+        loadCorrelation();
+        loadMonteCarlo();
       </script>
       <div class="quick-bar" id="quickBar">
         <span class="chip" onclick="quickAsk('SOXL signal today — RSI, MACD, and Kevin conviction?')">⚡ SOXL</span>
@@ -1965,6 +2320,22 @@ async def trigger_analysis(request: Request):
 @app.get("/analysis-status")
 async def analysis_status():
     return _trigger_state
+
+@app.get("/regime")
+async def regime_api():
+    return get_regime_data()
+
+@app.get("/backtest")
+async def backtest_api():
+    return get_backtest_data()
+
+@app.get("/correlation")
+async def correlation_api():
+    return get_correlation_data()
+
+@app.get("/monte-carlo")
+async def monte_carlo_api():
+    return run_monte_carlo()
 
 @app.get("/debug")
 async def debug():
