@@ -1905,7 +1905,7 @@ async def home(request: Request):
             const vc = d.ann_vol > 35 ? '#ff6b6b' : d.ann_vol > 20 ? '#ffd700' : '#00ff88';
             document.getElementById('regime-vol').innerHTML = '<span style="color:' + vc + '">' + d.ann_vol + '%</span>';
             const tips = {{
-              'BULL':    ['background:#00ff8822;border:1px solid #00ff88', '🟢 Normal sizing. Favor calls on Kevin\'s picks.'],
+              'BULL':    ['background:#00ff8822;border:1px solid #00ff88', '🟢 Normal sizing. Favor calls on Kevin picks.'],
               'NEUTRAL': ['background:#ffd70022;border:1px solid #ffd700', '🟡 Neutral. Standard sizing, wait for clear signals.'],
               'CHOPPY':  ['background:#ffd70022;border:1px solid #ffd700', '🟡 Choppy. Reduce position size, avoid over-trading.'],
               'BEAR':    ['background:#ff980022;border:1px solid #ff9800', '🟠 Bear market. Defensive posture, tighten stops.'],
@@ -2004,7 +2004,7 @@ async def home(request: Request):
               + '</div>';
             const strength = d.prob_profit >= 65 ? '🟢 Strong signal' : d.prob_profit >= 50 ? '🟡 Moderate signal' : '🔴 Weak signal';
             html += '<div style="font-size:12px;color:#8b949e">' + strength
-              + ' — Kevin\'s calls are profitable in ' + d.prob_profit + '% of simulated trade sequences.</div>';
+              + ' — Kevin calls are profitable in ' + d.prob_profit + '% of simulated trade sequences.</div>';
             document.getElementById('mc-display').innerHTML = html;
           }} catch(e) {{ document.getElementById('mc-display').innerText = 'Load failed: ' + e; }}
         }}
