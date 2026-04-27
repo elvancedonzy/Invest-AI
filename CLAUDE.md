@@ -3,6 +3,9 @@
 ## What This Is
 A fully automated AI-powered investment research platform. It reads daily Alpha Reports from Meet Kevin's Discord, analyzes them with Claude AI (91 reports of historical context), pulls live stock prices, and serves a mobile-friendly dashboard. Runs on a self-hosted K3s Kubernetes cluster on a Synology NAS.
 
+## Project Location
+`C:\Users\elvis\Downloads\Invest AI\` — canonical working directory. Always work from here.
+
 ## Key Files
 | File | Purpose |
 |------|---------|
