@@ -119,7 +119,7 @@ def db_log(profile_id, action, ticker=None, query=None, summary=None):
         with get_db() as con:
             con.execute(
                 "INSERT INTO history(profile_id,action,ticker,query,summary) VALUES(?,?,?,?,?)",
-                (profile_id, action, ticker, query, (summary or "")[:400])
+                (profile_id, action, ticker, query, (summary or "")[:1200])
             )
             # keep last 200 per profile
             con.execute("""DELETE FROM history WHERE profile_id=? AND id NOT IN (
@@ -1273,7 +1273,7 @@ async def home(request: Request):
           <h3 style="color:#00d4ff;font-size:14px">📋 Your Recent Activity</h3>
           <button onclick="toggleHistory()" style="background:none;border:none;color:#8b949e;font-size:18px;cursor:pointer">×</button>
         </div>
-        <div id="historyContent" style="font-size:12px;color:#8b949e;max-height:250px;overflow-y:auto"></div>
+        <div id="historyContent" style="font-size:12px;color:#8b949e;max-height:420px;overflow-y:auto"></div>
       </div>
 
       <div class="dash">
@@ -1646,25 +1646,56 @@ async def home(request: Request):
           loadWatchlist();
         }}
 
+        function toggleHistItem(el) {{
+          const detail  = el.querySelector('.hist-detail');
+          const preview = el.querySelector('.hist-preview');
+          const arrow   = el.querySelector('.hist-arrow');
+          if (!detail) return;
+          const open = detail.style.display !== 'none';
+          detail.style.display  = open ? 'none'  : 'block';
+          if (preview) preview.style.display = open ? 'block' : 'none';
+          if (arrow)   arrow.innerText = open ? '▾' : '▴';
+        }}
+
         async function toggleHistory() {{
           const panel = document.getElementById('historyPanel');
           if (panel.style.display === 'none') {{
             panel.style.display = 'block';
-            const r = await fetch('/my-history?limit=30');
+            const r = await fetch('/my-history?limit=50');
             const items = await r.json();
             if (!items.length) {{
-              document.getElementById('historyContent').innerHTML = '<span class="meta">No activity yet.</span>';
+              document.getElementById('historyContent').innerHTML =
+                '<span class="meta">No activity yet.</span>';
               return;
             }}
-            const icons = {{options:'📋',news:'📰',rsi:'📉',bars:'📉',ask:'🤖',prices:'💰'}};
+            const icons = {{options:'📋',news:'📰',rsi:'📉',bars:'📉',ask:'🤖',prices:'💰',watchlist:'💼'}};
             document.getElementById('historyContent').innerHTML = items.map(function(h) {{
-              const ic = icons[h.action] || '•';
-              return '<div style="padding:5px 0;border-bottom:1px solid #30363d">'
-                + '<span style="color:#8b949e">' + h.created_at.slice(0,16) + '</span> '
-                + ic + ' <b style="color:#e6edf3">' + h.action.toUpperCase() + '</b>'
-                + (h.ticker ? ' <span style="color:#00d4ff">' + h.ticker + '</span>' : '')
-                + (h.query  ? ' <span style="color:#c9d1d9">' + h.query + '</span>' : '')
-                + (h.summary? '<br><span style="color:#8b949e;font-size:11px">' + h.summary + '</span>' : '')
+              const ic       = icons[h.action] || '•';
+              const hasDetail = h.query || h.summary;
+              return '<div style="padding:6px 0;border-bottom:1px solid #21262d;cursor:'
+                + (hasDetail ? 'pointer' : 'default') + '"'
+                + (hasDetail ? ' onclick="toggleHistItem(this)"' : '') + '>'
+                // ── Header row ──────────────────────────────────────────────
+                + '<div style="display:flex;align-items:center;gap:6px;justify-content:space-between">'
+                + '<div>'
+                + '<span style="color:#8b949e;font-size:11px">' + h.created_at.slice(0,16) + '</span> '
+                + ic + ' <b style="color:#e6edf3;font-size:12px">' + h.action.toUpperCase() + '</b>'
+                + (h.ticker ? ' <span style="color:#00d4ff;font-size:12px">' + h.ticker + '</span>' : '')
+                + '</div>'
+                + (hasDetail ? '<span class="hist-arrow" style="color:#8b949e;font-size:11px;flex-shrink:0">▾</span>' : '')
+                + '</div>'
+                // ── Preview (one-line, shown by default) ────────────────────
+                + (h.query ? '<div class="hist-preview" style="color:#c9d1d9;font-size:11px;'
+                  + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;padding-left:4px">'
+                  + h.query + '</div>' : '')
+                // ── Full detail (hidden until clicked) ──────────────────────
+                + (hasDetail ? '<div class="hist-detail" style="display:none;margin-top:8px;'
+                  + 'padding:8px;background:#0d1117;border-radius:6px;border:1px solid #21262d">'
+                  + (h.query ? '<div style="color:#00d4ff;font-size:12px;font-weight:bold;margin-bottom:6px">Q: '
+                    + h.query + '</div>' : '')
+                  + (h.summary ? '<div style="color:#c9d1d9;font-size:12px;line-height:1.7;white-space:pre-wrap">'
+                    + h.summary + '</div>' : '')
+                  + '</div>' : '')
                 + '</div>';
             }}).join('');
           }} else {{
@@ -1871,9 +1902,11 @@ async def home(request: Request):
         }}
 
         async function ask() {{
-          const q = document.getElementById('q').value;
+          const q = document.getElementById('q').value.trim();
           if (!q) return;
-          document.getElementById('ans').innerText = 'Claude is thinking...';
+          const ansEl = document.getElementById('ans');
+          ansEl.style.opacity = '1';
+          ansEl.innerText = 'Claude is thinking...';
           try {{
             const r = await fetch('/ask', {{
               method: 'POST',
@@ -1881,11 +1914,35 @@ async def home(request: Request):
               body: JSON.stringify({{question: q}})
             }});
             const d = await r.json();
-            document.getElementById('ans').innerText = d.answer || d.detail || 'No response';
+            const answer = d.answer || d.detail || 'No response';
+            ansEl.innerText = answer;
+            // Persist so page refresh doesn't wipe it
+            try {{
+              localStorage.setItem('claude_last_q', q);
+              localStorage.setItem('claude_last_a', answer);
+              localStorage.setItem('claude_last_t', Date.now());
+            }} catch(e) {{}}
           }} catch(e) {{
-            document.getElementById('ans').innerText = 'Error: ' + e.message;
+            ansEl.innerText = 'Error: ' + e.message;
           }}
         }}
+
+        // Restore last answer on page load (survives auto-refresh)
+        (function() {{
+          try {{
+            const savedQ = localStorage.getItem('claude_last_q');
+            const savedA = localStorage.getItem('claude_last_a');
+            const savedT = parseInt(localStorage.getItem('claude_last_t') || '0');
+            if (savedA && (Date.now() - savedT) < 60 * 60 * 1000) {{ // keep for 1 hour
+              document.getElementById('q').value = savedQ || '';
+              const ansEl = document.getElementById('ans');
+              ansEl.innerText = savedA;
+              ansEl.style.opacity = '0.85';
+              ansEl.title = 'Restored — asked ' + Math.round((Date.now()-savedT)/60000) + ' min ago';
+            }}
+          }} catch(e) {{}}
+        }})();
+
         document.getElementById('q').addEventListener('keypress', function(e) {{
           if (e.key === 'Enter') ask();
         }});
@@ -2431,7 +2488,7 @@ async def ask(query: Query, request: Request):
         ]}],
     )
     answer = r.content[0].text
-    db_log(pid, "ask", query=query.question[:120], summary=answer[:200])
+    db_log(pid, "ask", query=query.question[:300], summary=answer[:1000])
     return {"answer": answer, "report": latest_name, "live_prices": prices}
 
 @app.get("/prices")
