@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fstab-fix2
+  namespace: invest-ai
+spec:
+  hostPID: true
+  restartPolicy: Never
+  containers:
+  - name: fstab-fix2
+    image: alpine:3.19
+    securityContext:
+      privileged: true
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      sed -i '/192.168.1.224.*alpha-reports/d' /host/etc/fstab
+      printf '192.168.1.224:/volume4/CE\\040UNION/alpha-reports /mnt/alpha-reports nfs defaults,_netdev,x-systemd.automount 0 0\n' >> /host/etc/fstab
+      echo "--- result ---"
+      grep alpha /host/etc/fstab
+    volumeMounts:
+    - name: host-root
+      mountPath: /host
+  volumes:
+  - name: host-root
+    hostPath:
+      path: /

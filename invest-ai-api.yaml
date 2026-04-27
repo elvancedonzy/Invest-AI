@@ -1,0 +1,307 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-script
+  namespace: invest-ai
+data:
+  main.py: |
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import HTMLResponse
+    from pydantic import BaseModel
+    import anthropic, os, glob, json, requests
+    from datetime import datetime
+
+    app = FastAPI()
+    REPORTS_DIR = "/reports/"
+    RESULTS_DIR = "/reports/results/"
+
+    def get_all_reports():
+        import re
+        def _date_key(f):
+            m = re.search(r'(\d+)-(\d+)-(\d{4})', os.path.basename(f))
+            return (int(m.group(3)), int(m.group(1)), int(m.group(2))) if m else (0, 0, 0)
+        files = sorted(glob.glob(os.path.join(REPORTS_DIR, "*.txt")), key=_date_key)
+        reports = []
+        for f in files:
+            with open(f, "r", errors="ignore") as fp:
+                reports.append({"name": os.path.basename(f), "content": fp.read()})
+        return reports
+
+    def get_latest_report():
+        reports = get_all_reports()
+        if not reports:
+            return None, None
+        latest = reports[-1]
+        return latest["name"], latest["content"]
+
+    def get_latest_analysis():
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        files = glob.glob(os.path.join(RESULTS_DIR, "*.txt"))
+        if not files:
+            return None
+        latest = max(files, key=os.path.getmtime)
+        with open(latest, "r", errors="ignore") as f:
+            return f.read()
+
+    def get_live_prices(tickers):
+        key = os.getenv("ALPACA_API_KEY")
+        secret = os.getenv("ALPACA_SECRET_KEY")
+        if not key:
+            return {}
+        try:
+            symbols = ",".join(tickers)
+            r = requests.get(
+                f"https://data.alpaca.markets/v2/stocks/snapshots?symbols={symbols}",
+                headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                timeout=5
+            )
+            data = r.json()
+            result = {}
+            for ticker in tickers:
+                if ticker in data:
+                    snap = data[ticker]
+                    latest_trade = snap.get("latestTrade", {})
+                    daily_bar = snap.get("dailyBar", {})
+                    prev_close = snap.get("prevDailyBar", {}).get("c", 0)
+                    price = latest_trade.get("p", 0)
+                    change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
+                    result[ticker] = {
+                        "price": round(price, 2),
+                        "change_pct": round(change_pct, 2),
+                        "volume": daily_bar.get("v", 0),
+                        "high": round(daily_bar.get("h", 0), 2),
+                        "low": round(daily_bar.get("l", 0), 2),
+                    }
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    def list_all_files():
+        result = []
+        for root, dirs, files in os.walk(REPORTS_DIR):
+            for f in files:
+                result.append(os.path.join(root, f))
+        return result
+
+    class Query(BaseModel):
+        question: str
+        tickers: list = ["SPY", "QQQ", "SOXL", "META", "MSFT"]
+
+    @app.get("/", response_class=HTMLResponse)
+    async def home():
+        analysis = get_latest_analysis()
+        report_name, _ = get_latest_report()
+        reports = get_all_reports()
+        report_count = len(reports)
+
+        # Get live prices for key tickers
+        prices = get_live_prices(["SPY", "QQQ", "SOXL", "META", "MSFT", "MRVL", "TSLA"])
+        price_html = ""
+        for ticker, data in prices.items():
+            if isinstance(data, dict) and "price" in data:
+                color = "#00ff88" if data["change_pct"] >= 0 else "#ff6b6b"
+                arrow = "▲" if data["change_pct"] >= 0 else "▼"
+                price_html += f'<span class="ticker"><b>{ticker}</b> ${data["price"]} <span style="color:{color}">{arrow}{abs(data["change_pct"])}%</span></span>'
+
+        analysis_html = analysis.replace("\n", "<br>") if analysis else "No analysis yet. Upload a report to Synology first."
+
+        return f"""<html>
+        <head>
+          <title>Invest AI</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta http-equiv="refresh" content="300">
+          <style>
+            *{{box-sizing:border-box;margin:0;padding:0}}
+            body{{font-family:Arial,sans-serif;max-width:960px;margin:0 auto;padding:15px;background:#0d1117;color:#e6edf3}}
+            h1{{color:#00d4ff;font-size:1.8em;margin-bottom:15px}}
+            h3{{color:#00d4ff;margin-bottom:10px}}
+            .card{{background:#161b22;padding:20px;border-radius:10px;margin:15px 0;border:1px solid #30363d}}
+            .ticker{{display:inline-block;background:#0d1117;padding:6px 12px;border-radius:6px;margin:4px;font-size:13px;border:1px solid #30363d}}
+            .badge{{background:#00d4ff;color:#000;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold}}
+            .badge-green{{background:#00ff88;color:#000;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold}}
+            input{{width:100%;padding:12px;font-size:15px;border-radius:8px;border:1px solid #30363d;margin:8px 0;background:#0d1117;color:#e6edf3}}
+            button{{background:#00d4ff;color:#000;padding:12px;font-size:15px;border:none;border-radius:8px;cursor:pointer;width:100%;font-weight:bold;margin-top:5px}}
+            button:hover{{background:#00b8d9}}
+            #ans{{margin-top:12px;padding:15px;background:#0d1117;border-radius:8px;min-height:40px;line-height:1.7;white-space:pre-wrap;border:1px solid #30363d}}
+            .analysis{{font-size:13px;line-height:1.7;max-height:700px;overflow-y:auto;padding-right:5px}}
+            .meta{{color:#8b949e;font-size:13px}}
+            .grid{{display:grid;grid-template-columns:1fr 1fr;gap:15px}}
+            @media(max-width:600px){{.grid{{grid-template-columns:1fr}}}}
+          </style>
+        </head>
+        <body>
+          <h1>📊 Invest AI</h1>
+
+          <div class="card">
+            <span class="badge-green">LIVE</span>
+            <span class="meta"> {datetime.now().strftime('%Y-%m-%d %H:%M')} &nbsp;|&nbsp;
+            <b style="color:#e6edf3">{report_count}</b> reports loaded &nbsp;|&nbsp;
+            Latest: <b style="color:#e6edf3">{report_name or 'None'}</b></span>
+            <div style="margin-top:12px">{price_html or '<span class="meta">Live prices loading...</span>'}</div>
+          </div>
+
+          <div class="grid">
+            <div class="card">
+              <h3>🤖 Ask Claude</h3>
+              <input type="text" id="q" placeholder="Should I buy SOXL calls today?"/>
+              <button onclick="ask()">Ask Claude</button>
+              <div id="ans"></div>
+            </div>
+            <div class="card">
+              <h3>📈 Latest Analysis</h3>
+              <div class="analysis">{analysis_html}</div>
+            </div>
+          </div>
+
+          <script>
+            async function ask() {{
+              const q = document.getElementById('q').value;
+              if (!q) return;
+              document.getElementById('ans').innerText = 'Claude is thinking...';
+              try {{
+                const r = await fetch('/ask', {{
+                  method: 'POST',
+                  headers: {{'Content-Type': 'application/json'}},
+                  body: JSON.stringify({{question: q}})
+                }});
+                const d = await r.json();
+                document.getElementById('ans').innerText = d.answer || d.detail || 'No response';
+              }} catch(e) {{
+                document.getElementById('ans').innerText = 'Error: ' + e.message;
+              }}
+            }}
+            document.getElementById('q').addEventListener('keypress', function(e) {{
+              if (e.key === 'Enter') ask();
+            }});
+          </script>
+        </body>
+        </html>"""
+
+    @app.post("/ask")
+    async def ask(query: Query):
+        reports = get_all_reports()
+        if not reports:
+            raise HTTPException(status_code=404, detail="No reports found.")
+
+        # Get live prices for mentioned tickers
+        prices = get_live_prices(query.tickers)
+        price_context = json.dumps(prices, indent=2) if prices else "Unavailable"
+
+        # Build history context
+        history = "\n\n".join([f"=== {r['name']} ===\n{r['content'][:600]}" for r in reports[:-1][-5:]])
+        latest_name, latest_content = reports[-1]["name"], reports[-1]["content"]
+
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        r = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=1200,
+            messages=[{"role": "user", "content": f"""You are an expert investment analyst.
+
+HISTORICAL CONTEXT (last 5 reports):
+{history}
+
+TODAY'S REPORT ({latest_name}):
+{latest_content}
+
+LIVE MARKET DATA:
+{price_context}
+
+Question: {query.question}
+
+Answer directly and actionably using both historical patterns and live prices.
+Show if this aligns with Kevin's multi-week conviction.
+Not personalized financial advice."""}]
+        )
+        return {"answer": r.content[0].text, "report": latest_name, "live_prices": prices}
+
+    @app.get("/prices")
+    async def prices():
+        tickers = ["SPY", "QQQ", "SOXL", "META", "MSFT", "MRVL", "TSLA", "AXON", "RKT"]
+        return get_live_prices(tickers)
+
+    @app.get("/reports")
+    async def reports():
+        r = get_all_reports()
+        return {"count": len(r), "reports": [x["name"] for x in r]}
+
+    @app.get("/health")
+    async def health():
+        name, _ = get_latest_report()
+        return {"status": "ok", "latest_report": name}
+
+    @app.get("/debug")
+    async def debug():
+        return {"reports_dir": REPORTS_DIR, "all_files": list_all_files(), "results_dir_exists": os.path.exists(RESULTS_DIR)}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: invest-ai-api
+  namespace: invest-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: invest-ai-api
+  template:
+    metadata:
+      labels:
+        app: invest-ai-api
+    spec:
+      containers:
+      - name: api
+        image: python:3.11-slim
+        command: ["/bin/sh", "-c"]
+        args:
+        - "pip install fastapi uvicorn anthropic requests -q && uvicorn main:app --host 0.0.0.0 --port 8000 --app-dir /scripts"
+        ports:
+        - containerPort: 8000
+        env:
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: invest-ai-secrets
+              key: ANTHROPIC_API_KEY
+        - name: ALPACA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: invest-ai-secrets
+              key: ALPACA_API_KEY
+        - name: ALPACA_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: invest-ai-secrets
+              key: ALPACA_SECRET_KEY
+        volumeMounts:
+        - name: reports
+          mountPath: /reports
+        - name: scripts
+          mountPath: /scripts
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: reports
+        hostPath:
+          path: /mnt/alpha-reports
+          type: Directory
+      - name: scripts
+        configMap:
+          name: api-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: invest-ai-service
+  namespace: invest-ai
+spec:
+  selector:
+    app: invest-ai-api
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: LoadBalancer

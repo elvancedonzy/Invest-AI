@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: alpha-analyzer
+  namespace: invest-ai
+spec:
+  schedule: "*/30 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: analyzer
+            image: python:3.11-slim
+            command: ["/bin/sh", "-c"]
+            args:
+            - "pip install anthropic -q && python /scripts/analyzer.py"
+            env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: ANTHROPIC_API_KEY
+            volumeMounts:
+            - name: reports
+              mountPath: /reports
+            - name: scripts
+              mountPath: /scripts
+          volumes:
+          - name: reports
+            hostPath:
+              path: /mnt/alpha-reports
+              type: Directory
+          - name: scripts
+            configMap:
+              name: analyzer-script
+          restartPolicy: OnFailure
