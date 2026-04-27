@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, Response, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
-import anthropic, os, glob, json, re, requests, sqlite3, subprocess, threading
+import anthropic, os, glob, json, re, requests, sqlite3, subprocess, threading, time
 from datetime import datetime, timedelta
 
 # ── Manual analysis trigger state ──────────────────��─────────────────────────
@@ -1316,7 +1316,10 @@ async def home(request: Request):
 
       <div class="grid">
         <div class="card">
-          <h3>🤖 Ask Claude <button class="help-btn" onclick="showHelp('ask-claude')">?</button></h3>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <h3 style="margin:0">🤖 Ask Claude <button class="help-btn" onclick="showHelp('ask-claude')">?</button></h3>
+            <button class="btn-sm" id="model-toggle" onclick="toggleAskModel()" title="Toggle Quality/Economy mode">⚡ Quality</button>
+          </div>
           <input type="text" id="q" placeholder="Should I buy SOXL calls today?"/>
           <button onclick="ask()">Ask Claude</button>
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
@@ -2156,6 +2159,33 @@ async def home(request: Request):
           document.getElementById('tr-table').innerHTML = html;
         }}
 
+        // ── Cost mode toggle ──────────────────────────────────────────
+        async function toggleAskModel() {{
+          const btn = document.getElementById('model-toggle');
+          const current = btn.innerText.includes('Quality') ? 'quality' : 'economy';
+          const next    = current === 'quality' ? 'economy' : 'quality';
+          try {{
+            const d = await (await fetch('/cost-mode/' + next, {{method:'POST'}})).json();
+            btn.innerText = next === 'economy' ? '💰 Economy' : '⚡ Quality';
+            btn.style.color = next === 'economy' ? '#ffd700' : '#8b949e';
+            btn.title = next === 'economy'
+              ? 'Economy mode: Haiku model (73% cheaper, slightly lower quality)'
+              : 'Quality mode: Sonnet model (best answers, higher cost)';
+          }} catch(e) {{ console.error(e); }}
+        }}
+        // Load current model state on page open
+        (async function() {{
+          try {{
+            const d = await (await fetch('/cost-mode')).json();
+            const btn = document.getElementById('model-toggle');
+            if (btn && d.mode === 'economy') {{
+              btn.innerText = '💰 Economy';
+              btn.style.color = '#ffd700';
+              btn.title = 'Economy mode: Haiku (73% cheaper)';
+            }}
+          }} catch(e) {{}}
+        }})();
+
         // Auto-load new sections on page load
         loadRegime();
         loadTrackRecord();
@@ -2264,7 +2294,7 @@ async def ask(query: Query, request: Request):
 
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     r = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=_ASK_MODEL["model"],
         max_tokens=1200,
         system=[{
             "type": "text",
@@ -2488,3 +2518,80 @@ async def monte_carlo_api():
 @app.get("/debug")
 async def debug():
     return {"reports_dir": REPORTS_DIR, "all_files": list_all_files(), "results_dir_exists": os.path.exists(RESULTS_DIR)}
+
+# ── Phase 4: Prometheus metrics for Grafana ───────────────────────────────────
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus text-format endpoint — scrape from Grafana."""
+    from fastapi.responses import PlainTextResponse
+    trades  = get_track_record()
+    closed  = [t for t in trades if t["outcome"] in ("HIT", "MISS")]
+    hits    = [t for t in closed  if t["outcome"] == "HIT"]
+    opens   = [t for t in trades  if t["outcome"] == "OPEN"]
+    hit_rate = round(len(hits) / len(closed) * 100, 1) if closed else 0
+
+    regime  = get_regime_data()
+    rmap    = {"BULL": 4, "NEUTRAL": 3, "CHOPPY": 2, "BEAR": 1, "CRASH": 0}
+    rval    = rmap.get(regime.get("regime", ""), 3) if not regime.get("error") else -1
+    spy_price = regime.get("spy", 0) if not regime.get("error") else 0
+    ann_vol   = regime.get("ann_vol", 0) if not regime.get("error") else 0
+
+    reports     = get_all_reports()
+    analysis_age = 0
+    files = glob.glob(os.path.join(RESULTS_DIR, "*.txt"))
+    if files:
+        analysis_age = int(time.time() - os.path.getmtime(max(files, key=os.path.getmtime)))
+
+    lines = [
+        "# HELP invest_ai_hit_rate Kevin call hit rate %",
+        "# TYPE invest_ai_hit_rate gauge",
+        f"invest_ai_hit_rate {hit_rate}",
+        "",
+        "# HELP invest_ai_trades Trade count by outcome",
+        "# TYPE invest_ai_trades gauge",
+        f'invest_ai_trades{{outcome="HIT"}} {len(hits)}',
+        f'invest_ai_trades{{outcome="MISS"}} {len(closed) - len(hits)}',
+        f'invest_ai_trades{{outcome="OPEN"}} {len(opens)}',
+        f'invest_ai_trades{{outcome="TOTAL"}} {len(trades)}',
+        "",
+        "# HELP invest_ai_regime Market regime (CRASH=0 BEAR=1 CHOPPY=2 NEUTRAL=3 BULL=4)",
+        "# TYPE invest_ai_regime gauge",
+        f"invest_ai_regime {rval}",
+        "",
+        "# HELP invest_ai_spy_price SPY last close price",
+        "# TYPE invest_ai_spy_price gauge",
+        f"invest_ai_spy_price {spy_price}",
+        "",
+        "# HELP invest_ai_volatility 20-day annualised SPY volatility %",
+        "# TYPE invest_ai_volatility gauge",
+        f"invest_ai_volatility {ann_vol}",
+        "",
+        "# HELP invest_ai_reports_total Alpha reports loaded",
+        "# TYPE invest_ai_reports_total gauge",
+        f"invest_ai_reports_total {len(reports)}",
+        "",
+        "# HELP invest_ai_analysis_age_seconds Seconds since last analysis file",
+        "# TYPE invest_ai_analysis_age_seconds gauge",
+        f"invest_ai_analysis_age_seconds {analysis_age}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+# ── Phase 4: Cost toggle — switch Ask Claude model ────────────────────────────
+
+_ASK_MODEL = {"model": "claude-sonnet-4-6"}   # runtime-mutable
+
+@app.get("/cost-mode")
+async def get_cost_mode():
+    return {"model": _ASK_MODEL["model"],
+            "mode": "economy" if "haiku" in _ASK_MODEL["model"] else "quality"}
+
+@app.post("/cost-mode/{mode}")
+async def set_cost_mode(mode: str):
+    if mode == "economy":
+        _ASK_MODEL["model"] = "claude-haiku-4-5-20251001"
+    elif mode == "quality":
+        _ASK_MODEL["model"] = "claude-sonnet-4-6"
+    else:
+        raise HTTPException(400, "mode must be 'economy' or 'quality'")
+    return {"model": _ASK_MODEL["model"], "mode": mode}

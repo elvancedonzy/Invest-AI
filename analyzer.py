@@ -238,6 +238,47 @@ def calculate_sentiment_delta(reports):
         "n": len(prior_scores),
     }
 
+# ── Earnings Alert ───────────────────────────────────────────────────────────
+
+WATCHED_TICKERS = ["META", "MSFT", "TSLA", "MRVL", "AXON", "RKT", "SOXL", "QQQ", "NVDA"]
+
+def check_upcoming_earnings():
+    """Return list of tickers with earnings within 7 days, using Polygon financials."""
+    key = os.getenv("POLYGON_API_KEY")
+    if not key:
+        return []
+    alerts = []
+    today  = datetime.utcnow().date()
+    for ticker in WATCHED_TICKERS:
+        try:
+            r = requests.get(
+                f"https://api.polygon.io/vX/reference/financials",
+                params={"ticker": ticker, "limit": 1, "sort": "period_of_report_date",
+                        "order": "desc", "apiKey": key},
+                timeout=8
+            )
+            results = r.json().get("results", [])
+            if not results:
+                continue
+            last = results[0]
+            period_end = last.get("end_date", "")
+            if not period_end:
+                continue
+            # Estimate next report: period_end + 45 days
+            from datetime import date
+            pe = date.fromisoformat(period_end)
+            next_report = pe + timedelta(days=45)
+            days_away   = (next_report - today).days
+            if 0 <= days_away <= 7:
+                alerts.append({
+                    "ticker": ticker,
+                    "next_date": str(next_report),
+                    "days_away": days_away,
+                })
+        except Exception:
+            continue
+    return alerts
+
 # ── Claude Analysis ───────────────────────────────────────────────────────────
 
 def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
@@ -321,7 +362,7 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
 
 # ── Notification ──────────────────────────────────────────────────────────────
 
-def notify_home_assistant(report_name, sentiment_delta=None, regime=None, risk=None):
+def notify_home_assistant(report_name, sentiment_delta=None, regime=None, risk=None, earnings_alerts=None):
     ha_url   = os.getenv("HA_URL", "").rstrip("/")
     ha_token = os.getenv("HA_TOKEN", "")
     ha_svc   = os.getenv("HA_NOTIFY_SERVICE", "notify")
@@ -345,7 +386,13 @@ def notify_home_assistant(report_name, sentiment_delta=None, regime=None, risk=N
                 f"Vol: {regime['ann_vol']}% | SPY {regime['pct_from_200']:+.1f}% from 200MA"
             )
         if risk and risk.get("alerts"):
-            parts.append("⚠️ ALERTS: " + " | ".join(risk["alerts"][:2]))
+            parts.append("⚠️ RISK: " + " | ".join(risk["alerts"][:2]))
+
+        if earnings_alerts:
+            ea = earnings_alerts[:2]
+            parts.append("📅 EARNINGS: " + ", ".join(
+                f"{e['ticker']} in {e['days_away']}d" for e in ea
+            ))
 
         parts.append("Open dashboard → Top 3 Actions")
 
@@ -420,6 +467,16 @@ def main():
 
     print(result)
     print(f"\nSaved to: {out}")
-    notify_home_assistant(latest_name, sentiment_delta=sd, regime=regime, risk=risk)
+
+    print("Checking upcoming earnings...")
+    earnings_alerts = check_upcoming_earnings()
+    if earnings_alerts:
+        for ea in earnings_alerts:
+            print(f"  ⚠️ {ea['ticker']} earnings in {ea['days_away']} days ({ea['next_date']})")
+    else:
+        print("  No earnings within 7 days for watched tickers")
+
+    notify_home_assistant(latest_name, sentiment_delta=sd, regime=regime,
+                          risk=risk, earnings_alerts=earnings_alerts)
 
 main()

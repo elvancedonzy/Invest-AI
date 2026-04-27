@@ -1,0 +1,66 @@
+# Home Assistant Lovelace Dashboard Card for Invest AI
+# Add this to your HA dashboard via: Settings → Dashboards → Edit → Add Card → Manual
+#
+# Requirements:
+#   - Your phone must be on the same WiFi as the NAS (192.168.1.x)
+#   - OR set up a VPN/tunnel for external access
+#
+# Option 1: Iframe Card (simplest — shows full dashboard)
+# ─────────────────────────────────────────────────────────
+type: iframe
+url: http://192.168.1.201:30080
+aspect_ratio: "16:9"
+title: Invest AI Dashboard
+
+---
+
+# Option 2: REST Sensor — pull regime into HA automations
+# Add to configuration.yaml under `sensor:`
+# ─────────────────────────────────────────────────────────
+# sensor:
+#   - platform: rest
+#     name: invest_ai_regime
+#     resource: http://192.168.1.201:30080/regime
+#     value_template: "{{ value_json.regime }}"
+#     scan_interval: 300
+#     json_attributes:
+#       - spy
+#       - ann_vol
+#       - pct_from_200
+#       - ma200
+#
+#   - platform: rest
+#     name: invest_ai_hit_rate
+#     resource: http://192.168.1.201:30080/track-record
+#     value_template: "{{ value_json.stats.hit_rate }}"
+#     scan_interval: 3600
+
+---
+
+# Option 3: Glance card showing key stats (requires REST sensors above)
+# ─────────────────────────────────────────────────────────
+# type: glance
+# title: Invest AI
+# entities:
+#   - entity: sensor.invest_ai_regime
+#     name: Regime
+#   - entity: sensor.invest_ai_hit_rate
+#     name: Hit Rate %
+
+---
+
+# Option 4: Notification automation — alert on BEAR/CRASH regime
+# Add to automations.yaml
+# ─────────────────────────────────────────────────────────
+# - alias: Invest AI Bear Regime Alert
+#   trigger:
+#     - platform: state
+#       entity_id: sensor.invest_ai_regime
+#       to:
+#         - "BEAR"
+#         - "CRASH"
+#   action:
+#     - service: notify.mobile_app_elvis
+#       data:
+#         title: "⚠️ Invest AI — Regime Changed"
+#         message: "Market regime is now {{ states('sensor.invest_ai_regime') }}. Review your positions."
