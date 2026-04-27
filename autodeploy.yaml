@@ -58,112 +58,149 @@ metadata:
   name: autodeploy-script
   namespace: invest-ai
 data:
-  deploy.sh: |
-    #!/bin/sh
-    set -e
+  deploy.py: |
+    #!/usr/bin/env python3
+    """
+    Invest AI CI/CD — polls GitHub every 5 min, deploys on new commits.
+    Pure Python: no curl pipe issues, no heredoc YAML problems.
+    """
+    import os, sys, json, subprocess, urllib.request, tempfile, shutil
+    from datetime import datetime, timezone
 
-    REPO="elvancedonzy/Invest-AI"
-    NS="invest-ai"
-    STATE_CM="autodeploy-state"
-    KUBECTL_CACHE="/reports/.bin/kubectl"
+    REPO      = "elvancedonzy/Invest-AI"
+    BRANCH    = "main"
+    NS        = "invest-ai"
+    STATE_CM  = "autodeploy-state"
+    KUBECTL   = "/reports/.bin/kubectl"
 
-    echo "[autodeploy] $(date '+%Y-%m-%d %H:%M:%S') checking for updates..."
+    def log(msg):
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[autodeploy] {ts} {msg}", flush=True)
 
-    # ── Ensure curl is available ──────────────────────────────────────────
-    if ! which curl > /dev/null 2>&1; then
-      echo "[autodeploy] Installing curl..."
-      apt-get update -qq && apt-get install -y -q curl
-    fi
+    def _fetch(url, extra_hdrs=None):
+        """Fetch URL — tries without auth first (public repo), falls back to token."""
+        hdrs = {"User-Agent": "invest-ai-autodeploy"}
+        if extra_hdrs:
+            hdrs.update(extra_hdrs)
+        try:
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                token = os.environ.get("GITHUB_TOKEN", "")
+                if token:
+                    hdrs["Authorization"] = "token " + token
+                    req = urllib.request.Request(url, headers=hdrs)
+                    with urllib.request.urlopen(req, timeout=20) as r:
+                        return r.read()
+            raise
 
-    # ── Ensure kubectl is available (cached on NFS after first download) ──
-    if [ ! -f "$KUBECTL_CACHE" ]; then
-      echo "[autodeploy] Downloading kubectl (one-time, cached to NFS)..."
-      mkdir -p /reports/.bin
-      curl -sLo "$KUBECTL_CACHE" \
-        "https://dl.k8s.io/release/v1.28.3/bin/linux/amd64/kubectl"
-      chmod +x "$KUBECTL_CACHE"
-      echo "[autodeploy] kubectl ready"
-    fi
-    export PATH="/reports/.bin:$PATH"
+    def gh_get(path):
+        hdrs = {"Accept": "application/vnd.github.v3+json"}
+        return json.loads(_fetch("https://api.github.com" + path, hdrs))
 
-    # ── Check latest GitHub commit (uses token for private repo) ────────
-    if [ -n "$GITHUB_TOKEN" ]; then
-      GH_RESPONSE=$(curl -s --connect-timeout 15 --max-time 30 \
-        -H "Accept: application/vnd.github.v3+json" \
-        -H "Authorization: token $GITHUB_TOKEN" \
-        "https://api.github.com/repos/$REPO/commits/main")
-    else
-      GH_RESPONSE=$(curl -s --connect-timeout 15 --max-time 30 \
-        -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/$REPO/commits/main")
-    fi
+    def download(url, dest):
+        data = _fetch(url)
+        with open(dest, "wb") as f:
+            f.write(data)
 
-    LATEST=$(echo "$GH_RESPONSE" | \
-      python3 -c "import json,sys; d=json.load(sys.stdin); print(d['sha'])" 2>/dev/null || echo "")
+    def kube(*args, stdin=None):
+        return subprocess.run(
+            [KUBECTL] + list(args),
+            capture_output=True, text=True, input=stdin)
 
-    if [ -z "$LATEST" ]; then
-      echo "[autodeploy] WARNING: Could not parse SHA. API response: $(echo "$GH_RESPONSE" | cut -c1-300)"
-      exit 0
-    fi
+    def ensure_kubectl():
+        if not os.path.exists(KUBECTL):
+            log("Downloading kubectl (one-time, cached to NFS)...")
+            os.makedirs(os.path.dirname(KUBECTL), exist_ok=True)
+            download(
+                "https://dl.k8s.io/release/v1.28.3/bin/linux/amd64/kubectl",
+                KUBECTL)
+            os.chmod(KUBECTL, 0o755)
+            log("kubectl cached to NFS")
 
-    echo "[autodeploy] Latest commit : $LATEST"
+    def apply_configmap(cm_name, file_key, file_path):
+        dry = kube("create", "configmap", cm_name,
+                   f"--from-file={file_key}={file_path}",
+                   "-n", NS, "--dry-run=client", "-o", "yaml")
+        result = kube("apply", "-f", "-", stdin=dry.stdout)
+        status = result.stdout.strip() or result.stderr.strip()
+        log(f"  {cm_name}: {status[:80]}")
 
-    # ── Compare with last deployed commit ────────────────────────────────
-    DEPLOYED=$(kubectl get configmap $STATE_CM -n $NS \
-      -o jsonpath='{.data.last_commit}' 2>/dev/null || echo "")
+    def main():
+        log("Checking for updates...")
+        ensure_kubectl()
 
-    echo "[autodeploy] Last deployed : ${DEPLOYED:-none}"
+        # ── Get latest commit SHA from GitHub ──────────────────────────────
+        try:
+            data   = gh_get(f"/repos/{REPO}/commits/{BRANCH}")
+            latest = data["sha"]
+        except Exception as e:
+            log(f"WARNING: GitHub API error — {e}")
+            sys.exit(0)
 
-    if [ "$LATEST" = "$DEPLOYED" ]; then
-      echo "[autodeploy] Already up to date — nothing to do"
-      exit 0
-    fi
+        log(f"Latest commit:  {latest[:12]}")
 
-    echo "[autodeploy] New commit detected! Deploying..."
+        # ── Get last deployed commit from ConfigMap ────────────────────────
+        res      = kube("get", "configmap", STATE_CM,
+                        "-n", NS, "-o", "jsonpath={.data.last_commit}")
+        deployed = res.stdout.strip() if res.returncode == 0 else ""
+        log(f"Last deployed:  {deployed[:12] if deployed else 'none'}")
 
-    # ── Download updated files ────────────────────────────────────────────
-    BASE="https://raw.githubusercontent.com/$REPO/$LATEST"
-    TMP=$(mktemp -d)
+        if latest == deployed:
+            log("Already up to date — nothing to do")
+            return
 
-    dl() {{
-      if [ -n "$GITHUB_TOKEN" ]; then
-        curl -sf -H "Authorization: token $GITHUB_TOKEN" "$1" -o "$2"
-      else
-        curl -sf "$1" -o "$2"
-      fi
-    }}
+        log(f"New commit detected! Deploying {latest[:12]}...")
 
-    dl "$BASE/main.py"     "$TMP/main.py"     && echo "[autodeploy]   Got main.py"
-    dl "$BASE/analyzer.py" "$TMP/analyzer.py" && echo "[autodeploy]   Got analyzer.py"
-    dl "$BASE/backfill.py" "$TMP/backfill.py" 2>/dev/null && echo "[autodeploy]   Got backfill.py" || true
+        # ── Download updated files ─────────────────────────────────────────
+        base = f"https://raw.githubusercontent.com/{REPO}/{latest}"
+        tmp  = tempfile.mkdtemp()
 
-    # ── Update ConfigMaps ─────────────────────────────────────────────────
-    kubectl create configmap api-script \
-      --from-file=main.py="$TMP/main.py" -n $NS \
-      --dry-run=client -o yaml | kubectl apply -f -
+        try:
+            for fname, cm_name in [
+                ("main.py",     "api-script"),
+                ("analyzer.py", "analyzer-script"),
+            ]:
+                dest = os.path.join(tmp, fname)
+                try:
+                    download(f"{base}/{fname}", dest)
+                    log(f"  Downloaded {fname}")
+                    apply_configmap(cm_name, fname, dest)
+                except Exception as e:
+                    log(f"  ERROR on {fname}: {e}")
+                    return
 
-    kubectl create configmap analyzer-script \
-      --from-file=analyzer.py="$TMP/analyzer.py" -n $NS \
-      --dry-run=client -o yaml | kubectl apply -f -
+            # backfill.py is optional
+            try:
+                dest = os.path.join(tmp, "backfill.py")
+                download(f"{base}/backfill.py", dest)
+                log("  Downloaded backfill.py")
+                apply_configmap("backfill-script", "backfill.py", dest)
+            except Exception:
+                pass
 
-    [ -f "$TMP/backfill.py" ] && \
-      kubectl create configmap backfill-script \
-        --from-file=backfill.py="$TMP/backfill.py" -n $NS \
-        --dry-run=client -o yaml | kubectl apply -f -
+            # ── Restart API deployment ─────────────────────────────────────
+            log("Restarting invest-ai-api...")
+            kube("rollout", "restart", "deployment/invest-ai-api", "-n", NS)
+            status = kube("rollout", "status", "deployment/invest-ai-api",
+                          "-n", NS, "--timeout=120s")
+            log(status.stdout.strip() or status.stderr.strip()[:80])
 
-    # ── Restart API deployment ────────────────────────────────────────────
-    echo "[autodeploy] Restarting invest-ai-api..."
-    kubectl rollout restart deployment/invest-ai-api -n $NS
-    kubectl rollout status  deployment/invest-ai-api -n $NS --timeout=120s
+            # ── Save deployed commit ───────────────────────────────────────
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            dry = kube("create", "configmap", STATE_CM,
+                       f"--from-literal=last_commit={latest}",
+                       f"--from-literal=deployed_at={now}",
+                       "-n", NS, "--dry-run=client", "-o", "yaml")
+            kube("apply", "-f", "-", stdin=dry.stdout)
+            log(f"Done! Running commit: {latest[:12]}")
 
-    # ── Save deployed commit to ConfigMap ─────────────────────────────────
-    kubectl create configmap $STATE_CM \
-      --from-literal=last_commit="$LATEST" \
-      --from-literal=deployed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-      -n $NS --dry-run=client -o yaml | kubectl apply -f -
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
-    rm -rf "$TMP"
-    echo "[autodeploy] Done! Running commit: $LATEST"
+    main()
 
 ---
 apiVersion: batch/v1
@@ -174,8 +211,8 @@ metadata:
   labels:
     app: autodeploy
 spec:
-  schedule: "*/5 * * * *"       # every 5 minutes
-  concurrencyPolicy: Forbid      # never run two at once
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
@@ -189,7 +226,7 @@ spec:
           containers:
           - name: deployer
             image: python:3.11-slim
-            command: ["/bin/sh", "/scripts/deploy.sh"]
+            command: ["python3", "/scripts/deploy.py"]
             env:
             - name: GITHUB_TOKEN
               valueFrom:
