@@ -1066,6 +1066,20 @@ async def home(request: Request):
             "how": "Correlation break alert fires when the 20-day rolling correlation deviates >0.25 from the 60-day baseline — meaning SOXL is behaving unusually vs tech. Monte Carlo shows P(profit), median return, and the worst 5% scenario so you understand your real risk.",
             "tip": "A correlation break on SOXL/QQQ is often an early warning of sector rotation or a volatility event in semiconductors. When it fires, reduce SOXL position size until the correlation normalizes.",
             "links": [{"label": "Correlation in finance", "url": "https://www.investopedia.com/terms/c/correlation.asp"}, {"label": "Monte Carlo simulation", "url": "https://www.investopedia.com/terms/m/montecarlosimulation.asp"}]
+        },
+        "ai-sentiment": {
+            "title": "AI News Sentiment",
+            "what": "Claude Haiku reads the 5 most recent news headlines for any ticker and outputs a sentiment score from -10 (very bearish) to +10 (very bullish), a direction (BULLISH / NEUTRAL / BEARISH), and a one-sentence theme summary.",
+            "how": "Click any ticker tab (SPY, QQQ, SOXL, META, MSFT, MRVL, TSLA, NVDA) to score it instantly. Use this BEFORE entering a trade — if Kevin is bullish on SOXL but news sentiment is -6 (bearish), that is a conflict worth pausing for.",
+            "tip": "News sentiment changes fast. A score from 10 minutes ago can be irrelevant after a major headline. Always refresh before acting. This uses Claude Haiku (~$0.001 per query) — very cheap to run often.",
+            "links": [{"label": "How news moves markets", "url": "https://www.investopedia.com/articles/investing/060315/how-news-moves-markets.asp"}, {"label": "Sentiment analysis explained", "url": "https://www.investopedia.com/terms/s/sentimentindicator.asp"}]
+        },
+        "rsi-zone": {
+            "title": "RSI Zone Analysis",
+            "what": "Looks at every closed Kevin call in your track record, fetches the RSI value at the time of that call from Alpaca historical data, and groups the results by RSI zone. Shows which RSI level gives Kevin the highest hit rate.",
+            "how": "Click Run Analysis — it fetches RSI for up to 60 closed trades from Alpaca (takes ~30 seconds). The result shows hit rate by zone: Oversold (<30), Low (30-50), Neutral (50-70), Overbought (>70). Use the best zone as a filter: only take Kevin calls when RSI is in the high-hit-rate zone.",
+            "tip": "If Kevin calls are most accurate when RSI is below 50, that tells you to WAIT for a pullback before entering even when Kevin is bullish. This is the RSI timing filter the institutional traders use.",
+            "links": [{"label": "RSI explained", "url": "https://www.investopedia.com/terms/r/rsi.asp"}, {"label": "Using RSI to time entries", "url": "https://www.investopedia.com/articles/active-trading/042114/overbought-or-oversold-use-relative-strength-index-find-out.asp"}]
         }
     })
 
@@ -1444,7 +1458,7 @@ async def home(request: Request):
 
       <div class="card">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
-            <h3 style="margin:0">🧠 AI News Sentiment</h3>
+            <h3 style="margin:0">🧠 AI News Sentiment <button class="help-btn" onclick="showHelp('ai-sentiment')">?</button></h3>
             <button class="btn-sm" onclick="loadNewsSentiment()">↻ Refresh</button>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px" id="sent-ticker-bar">
@@ -1462,7 +1476,7 @@ async def home(request: Request):
 
         <div class="card">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
-            <h3 style="margin:0">📐 RSI Zone Analysis</h3>
+            <h3 style="margin:0">📐 RSI Zone Analysis <button class="help-btn" onclick="showHelp('rsi-zone')">?</button></h3>
             <button class="btn-sm" id="rsi-analysis-btn" onclick="loadRsiAnalysis()">Run Analysis</button>
           </div>
           <div class="meta" style="margin-bottom:8px;font-size:12px">Which RSI level gives Kevin the highest hit rate?</div>
