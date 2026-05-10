@@ -668,7 +668,7 @@ def get_options_expirations(ticker):
         return []
     try:
         r = requests.get(
-            "https://sandbox.tradier.com/v1/markets/options/expirations",
+            "https://api.tradier.com/v1/markets/options/expirations",
             params={"symbol": ticker, "includeAllRoots": "true", "strikes": "false"},
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=5
@@ -684,7 +684,7 @@ def get_options_chain(ticker, expiration):
         return {"error": "TRADIER_TOKEN not configured"}
     try:
         r = requests.get(
-            "https://sandbox.tradier.com/v1/markets/options/chains",
+            "https://api.tradier.com/v1/markets/options/chains",
             params={"symbol": ticker, "expiration": expiration, "greeks": "false"},
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=10
@@ -707,6 +707,124 @@ def get_options_chain(ticker, expiration):
         return {"calls": calls, "puts": puts}
     except Exception as e:
         return {"error": str(e)}
+
+def build_options_context(tickers, prices):
+    """Fetch nearest-expiry options for each ticker and return compact text for Claude.
+    Only includes strikes within 15% of the current price to keep token count low."""
+    lines = []
+    for ticker in tickers:
+        price = (prices.get(ticker) or {}).get("price")
+        exps = get_options_expirations(ticker)
+        if not exps:
+            continue
+        chain = get_options_chain(ticker, exps[0])
+        if "error" in chain:
+            continue
+        lo = price * 0.85 if price else 0
+        hi = price * 1.15 if price else float("inf")
+        def near(opts):
+            return [o for o in opts if o["strike"] and lo <= o["strike"] <= hi]
+        calls = near(chain["calls"])
+        puts  = near(chain["puts"])
+        if not calls and not puts:
+            calls = chain["calls"][:5]
+            puts  = chain["puts"][:5]
+        def row(o):
+            return f"  ${o['strike']} bid={o['bid']} ask={o['ask']} vol={o['volume']} OI={o['open_interest']}"
+        lines.append(f"{ticker} options (exp {exps[0]}, spot ~${price}):")
+        if calls:
+            lines.append(" CALLS:")
+            lines.extend(row(o) for o in calls)
+        if puts:
+            lines.append(" PUTS:")
+            lines.extend(row(o) for o in puts)
+    return "\n".join(lines) if lines else ""
+
+# ── RSI for Ask Claude context ────────────────────────────────────────────────
+
+def _calc_rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return None
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        d = closes[i] - closes[i - 1]
+        if d > 0: gains += d
+        else:     losses -= d
+    avg_gain = gains / period
+    avg_loss = losses / period
+    for i in range(period + 1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        avg_gain = (avg_gain * (period - 1) + (d if d > 0 else 0)) / period
+        avg_loss = (avg_loss * (period - 1) + (-d if d < 0 else 0)) / period
+    return round(100 - 100 / (1 + (avg_gain / avg_loss if avg_loss else 1e9)), 1)
+
+def build_rsi_context(tickers):
+    key    = os.getenv("ALPACA_API_KEY")
+    secret = os.getenv("ALPACA_SECRET_KEY")
+    if not key:
+        return ""
+    lines = []
+    for ticker in tickers:
+        try:
+            start = (datetime.utcnow() - timedelta(days=90)).strftime("%Y-%m-%d")
+            r = requests.get(
+                f"https://data.alpaca.markets/v2/stocks/{ticker}/bars",
+                params={"timeframe": "1Day", "limit": 60, "adjustment": "split",
+                        "start": start, "sort": "asc"},
+                headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                timeout=6,
+            )
+            closes = [b["c"] for b in r.json().get("bars", [])]
+            rsi = _calc_rsi(closes)
+            if rsi is None:
+                continue
+            if rsi < 30:   label = "oversold"
+            elif rsi < 50: label = "low"
+            elif rsi < 70: label = "neutral"
+            else:          label = "overbought"
+            lines.append(f"  {ticker}: RSI {rsi} ({label})")
+        except Exception:
+            pass
+    return "\n".join(lines)
+
+# ── Earnings calendar context for Ask Claude ─────────────────────────────────
+
+def build_earnings_context():
+    try:
+        items = get_earnings_calendar()
+        if not items:
+            return ""
+        parts = []
+        for e in items:
+            days = e.get("days_away")
+            warn = " ⚠️ SOON" if days is not None and days <= 14 else ""
+            parts.append(f"  {e['ticker']}: ~{e['next_date']} ({days}d away){warn}")
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+# ── Market regime context for Ask Claude ─────────────────────────────────────
+
+_regime_cache: dict = {"data": None, "ts": 0.0}
+
+def build_regime_context():
+    import time
+    if _regime_cache["data"] and time.time() - _regime_cache["ts"] < 3600:
+        return _regime_cache["data"]
+    try:
+        d = get_regime_data()
+        if "error" in d:
+            return ""
+        text = (
+            f"{d['regime']} | SPY ${d['spy']} | "
+            f"MA50 ${d['ma50']} | MA200 ${d['ma200']} ({d['pct_from_200']:+.1f}%) | "
+            f"Ann.Vol {d['ann_vol']}%"
+        )
+        _regime_cache["data"] = text
+        _regime_cache["ts"]   = time.time()
+        return text
+    except Exception:
+        return ""
 
 class Query(BaseModel):
     question: str
@@ -1036,7 +1154,7 @@ async def home(request: Request):
             "title": "Options Chain",
             "what": "Shows all available call and put options for a stock, sorted by strike price and expiry date. Kevin frequently recommends specific options plays — this lets you see the current prices before acting.",
             "how": "Enter a ticker and click Load. Pick an expiry from the dropdown. CALLS (green, left) profit when the stock goes up. PUTS (red, right) profit when it goes down. The strike price is the agreed buy/sell price. High Open Interest (OI) means the contract is actively traded — easier to enter and exit.",
-            "tip": "Note: This dashboard uses a Tradier sandbox account — prices are simulated. Always verify the actual bid/ask in your real brokerage before placing an options order. Options pricing changes fast.",
+            "tip": "Options pricing changes fast — always confirm the bid/ask in your brokerage before placing an order. High Open Interest means the contract is liquid and easier to fill at a fair price.",
             "links": [{"label": "How to read an options chain", "url": "https://www.investopedia.com/terms/o/optionchain.asp"}, {"label": "Options basics for beginners", "url": "https://www.investopedia.com/options-basics-tutorial-4583012"}]
         },
         "news": {
@@ -2462,14 +2580,24 @@ async def ask(query: Query, request: Request):
         f"{track_context}"
     )
 
+    options_context  = build_options_context(query.tickers, prices)
+    rsi_context      = build_rsi_context(query.tickers)
+    earnings_context = build_earnings_context()
+    regime_context   = build_regime_context()
+
     # Volatile context: live prices, user profile, and the question — never cache.
     volatile_block = (
         f"{user_context}"
-        f"LIVE MARKET DATA:\n{price_context}\n\n"
-        f"Question: {query.question}\n\n"
+        + (f"MARKET REGIME: {regime_context}\n\n" if regime_context else "")
+        + f"LIVE MARKET DATA:\n{price_context}\n\n"
+        + (f"RSI (14-day):\n{rsi_context}\n\n" if rsi_context else "")
+        + (f"LIVE OPTIONS CHAIN (nearest expiry, ATM ±15%):\n{options_context}\n\n" if options_context else "")
+        + (f"EARNINGS CALENDAR (estimated dates — verify before trading):\n{earnings_context}\n\n" if earnings_context else "")
+        + f"Question: {query.question}\n\n"
         "Answer directly and actionably. Reference the user's current positions and recent lookups "
         "when relevant — e.g. if they have SOXL in their watchlist or recently checked SOXL RSI, factor that in.\n"
         "Reference Kevin's hit rate and past calls on this ticker if available.\n"
+        "Flag earnings risk if a ticker has earnings within 14 days.\n"
         "Not personalized financial advice."
     )
 
