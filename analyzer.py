@@ -209,61 +209,121 @@ def _pick_expiration(expirations, target_dte=45):
             best, best_gap = e, gap
     return best
 
-def attach_options_companions(trades, *, target_dte=45):
-    """For each shares trade, attach a real options companion from the Tradier
-    chain — ATM call (LONG) or ATM put (SHORT). Overwrites any model-generated
-    options block. Drops the block silently if no usable chain is available."""
+def attach_options_companions(trades, *, budget=None, min_dte=14, max_dte=50):
+    """For each shares trade, attach a real options companion priced at or
+    under `budget` (premium × 100). Walks expirations longest-DTE-first within
+    [min_dte, max_dte]; within each, walks strikes outward from ATM in the
+    trade's direction and takes the first contract that fits the budget. This
+    gives the highest-delta contract you can afford. Drops the block if no
+    contract fits — shares-only is honest, fake premiums are not."""
+    if budget is None:
+        try:
+            budget = float(os.getenv("OPTIONS_BUDGET", "500"))
+        except (TypeError, ValueError):
+            budget = 500.0
     if not os.getenv("TRADIER_TOKEN"):
         print("  TRADIER_TOKEN not set — skipping options companions")
         for t in trades:
             t["options"] = None
         return
+    print(f"  Options budget: ${budget:.0f} per contract (premium × 100)")
     for t in trades:
-        ticker = str(t.get("ticker", "")).upper()
-        direction = str(t.get("direction", "LONG")).upper()
-        entry = t.get("entry")
-        if not ticker or not entry:
-            t["options"] = None
+        t["options"] = _pick_options_companion(t, budget, min_dte, max_dte)
+        ticker = t.get("ticker", "?")
+        if t["options"] is None:
+            print(f"    {ticker}: no contract fits ${budget:.0f} budget — shares only")
+
+def _pick_options_companion(trade, budget, min_dte, max_dte):
+    ticker = str(trade.get("ticker", "")).upper()
+    direction = str(trade.get("direction", "LONG")).upper()
+    spot = trade.get("entry")
+    if not ticker or not spot:
+        return None
+    spot = float(spot)
+    opt_type = "call" if direction == "LONG" else "put"
+
+    exps = _tradier_expirations(ticker)
+    if not exps:
+        return None
+
+    today = datetime.utcnow().date()
+    dated = []
+    for e in exps:
+        try:
+            d = datetime.fromisoformat(e).date()
+        except Exception:
             continue
-        exps = _tradier_expirations(ticker)
-        exp  = _pick_expiration(exps, target_dte=target_dte)
-        if not exp:
-            t["options"] = None
-            continue
+        dte = (d - today).days
+        if min_dte <= dte <= max_dte:
+            dated.append((dte, e))
+    # Longest DTE first — less theta — but cap at the bottom of the range.
+    dated.sort(reverse=True)
+
+    for dte, exp in dated:
         chain = _tradier_chain(ticker, exp)
         if not chain:
-            t["options"] = None
             continue
-        opt_type = "call" if direction == "LONG" else "put"
-        same_type = [o for o in chain if o.get("option_type") == opt_type and o.get("strike")]
-        if not same_type:
-            t["options"] = None
+        candidates = [o for o in chain
+                      if o.get("option_type") == opt_type and o.get("strike")]
+        if not candidates:
             continue
-        # ATM: closest strike to entry
-        atm = min(same_type, key=lambda o: abs(float(o["strike"]) - float(entry)))
-        bid = atm.get("bid") or 0
-        ask = atm.get("ask") or 0
-        last = atm.get("last") or 0
-        # Use the ask (what you actually pay buying calls); fall back to last if no ask
-        opt_entry = float(ask) if ask else float(last)
-        if not opt_entry or opt_entry <= 0:
-            t["options"] = None
-            continue
-        # Stop = 50% of premium paid (standard options stop rule for premium buyers)
-        # Target = 2× premium paid (≈ 100% gain — typical for ATM 45 DTE on a ~13% underlying move)
-        opt_stop   = round(opt_entry * 0.50, 2)
-        opt_target = round(opt_entry * 2.00, 2)
-        t["options"] = {
-            "type": opt_type,
-            "strike": float(atm["strike"]),
-            "expiration": exp,
-            "entry": round(opt_entry, 2),
-            "stop_loss": opt_stop,
-            "target": opt_target,
-            "rationale": (f"ATM {opt_type} ~{_dte(exp)} DTE; real Tradier ask used. "
-                          f"Stop at 50% of premium, target at 100% gain. "
-                          f"(bid {bid} / ask {ask})"),
-        }
+        # Strike must be within the same setup as the shares plan:
+        # LONG calls — strike ≤ shares target (so if shares hit target, the call
+        # is ITM at expiry and profits). SHORT puts — strike ≥ shares target.
+        # Walk strikes ATM-outward — the first that fits the budget is the
+        # highest-delta affordable contract within the share-target window.
+        share_target = trade.get("target")
+        try:
+            share_target = float(share_target) if share_target else None
+        except (TypeError, ValueError):
+            share_target = None
+
+        if direction == "LONG":
+            max_strike = spot * 1.25
+            if share_target:
+                max_strike = min(max_strike, share_target)
+            candidates = sorted(
+                (c for c in candidates
+                 if spot * 0.97 <= float(c["strike"]) <= max_strike),
+                key=lambda o: float(o["strike"])
+            )
+        else:
+            min_strike = spot * 0.75
+            if share_target:
+                min_strike = max(min_strike, share_target)
+            candidates = sorted(
+                (c for c in candidates
+                 if min_strike <= float(c["strike"]) <= spot * 1.03),
+                key=lambda o: -float(o["strike"])
+            )
+
+        for c in candidates:
+            ask  = c.get("ask")  or 0
+            last = c.get("last") or 0
+            bid  = c.get("bid")  or 0
+            premium = float(ask) if ask else float(last)
+            if premium <= 0:
+                continue
+            cost = premium * 100
+            if cost > budget:
+                continue
+            strike = float(c["strike"])
+            return {
+                "type": opt_type,
+                "strike": strike,
+                "expiration": exp,
+                "entry": round(premium, 2),
+                "stop_loss": round(premium * 0.50, 2),
+                "target":    round(premium * 2.00, 2),
+                "rationale": (
+                    f"{opt_type.upper()} ${strike:g} {exp} (~{dte} DTE, "
+                    f"{(strike-spot)/spot*100:+.1f}% from spot). "
+                    f"Cost ~${cost:.0f} under ${budget:.0f} cap. "
+                    f"Stop at 50% of premium, target at 100% gain. "
+                    f"Tradier bid {bid} / ask {ask}."
+                ),
+            }
+    return None
 
 def _dte(expiration):
     try:
@@ -928,8 +988,6 @@ def main():
                 print(f"    {t['ticker']}: {opt['type'].upper()} ${opt['strike']:g} "
                       f"{opt['expiration']} — ask ${opt['entry']} "
                       f"(stop ${opt['stop_loss']}, target ${opt['target']})")
-            else:
-                print(f"    {t['ticker']}: no options companion")
 
     if trade_plan and trade_plan.get("trades"):
         plan_path = os.path.join(RESULTS_DIR, f"{base}_trade_plan.json")
