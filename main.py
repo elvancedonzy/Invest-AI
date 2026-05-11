@@ -247,6 +247,19 @@ def get_latest_analysis():
     with open(latest, "r", errors="ignore") as f:
         return f.read()
 
+def get_latest_trade_plan():
+    """Return the most recent {base}_trade_plan.json as a dict, or None."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    files = glob.glob(os.path.join(RESULTS_DIR, "*_trade_plan.json"))
+    if not files:
+        return None
+    latest = max(files, key=os.path.getmtime)
+    try:
+        with open(latest, "r", errors="ignore") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
 def get_live_prices(tickers):
     key = os.getenv("ALPACA_API_KEY")
     secret = os.getenv("ALPACA_SECRET_KEY")
@@ -360,6 +373,173 @@ def build_track_record_html(trades):
         '<button class="btn-sm" onclick="toggleTRAll()">Show all trades</button>'
         '</div>'
     )
+
+def build_trade_plan_html(plan):
+    """Render the phone-friendly Trade Plan card. Each trade gets entry/stop/target
+    fields with one-tap copy buttons so the user can read off → type into Robinhood."""
+    if not plan or not plan.get("trades"):
+        return (
+            '<div style="color:#8b949e;font-size:13px;padding:8px 0">'
+            'No trade plan for today. The analyzer extracts up to 3 high-conviction '
+            'setups per Alpha Report — none were clean enough today. '
+            'Wait for the next report or skip the session.'
+            '</div>'
+        )
+
+    ts = plan.get("generated_at", "")
+    if ts:
+        try:
+            ts = datetime.fromisoformat(ts).strftime("%b %d %H:%M")
+        except Exception:
+            ts = ts[:16].replace("T", " ")
+
+    cards = []
+    for i, t in enumerate(plan["trades"][:5]):
+        ticker     = str(t.get("ticker", "?")).upper()
+        direction  = str(t.get("direction", "LONG")).upper()
+        instrument = str(t.get("instrument", "shares")).lower()
+        entry      = t.get("entry")
+        stop       = t.get("stop_loss")
+        target     = t.get("target")
+        stop_pct   = t.get("stop_pct")
+        target_pct = t.get("target_pct")
+        conviction = str(t.get("conviction", "MEDIUM")).upper()
+        horizon    = t.get("horizon", "")
+        rationale  = t.get("rationale", "")
+
+        # Direction tint + conviction badge
+        dir_color = "#00ff88" if direction == "LONG" else "#ff6b6b"
+        conv_colors = {"HIGH": "#00ff88", "MEDIUM": "#ffd700", "LOW": "#8b949e"}
+        conv_color = conv_colors.get(conviction, "#8b949e")
+
+        # Instrument warning for options (theta risk) — fires when the primary
+        # trade itself is options. Companion options (under shares) get their own
+        # block rendered further down.
+        inst_warn = ""
+        if "option" in instrument or instrument in ("calls", "puts"):
+            inst_warn = (
+                '<div style="margin-top:6px;padding:6px 8px;background:#2a1f0d;'
+                'border-left:3px solid #ff9800;border-radius:4px;font-size:11px;color:#ffd700">'
+                '⚠️ Options — set a calendar reminder for the mid-DTE check; '
+                'theta will start biting around then.'
+                '</div>'
+            )
+
+        def fmt_num(v):
+            try:
+                return f"{float(v):.2f}"
+            except Exception:
+                return "?"
+        def fmt_pct(v):
+            try:
+                f = float(v); sign = "+" if f >= 0 else ""
+                return f"{sign}{f:.1f}%"
+            except Exception:
+                return ""
+
+        entry_s   = fmt_num(entry)
+        stop_s    = fmt_num(stop)
+        target_s  = fmt_num(target)
+        stop_pct_s   = fmt_pct(stop_pct)   if stop_pct   is not None else ""
+        target_pct_s = fmt_pct(target_pct) if target_pct is not None else ""
+
+        def cell(label, value, color, badge=""):
+            badge_html = (f'<span style="color:{color};font-size:11px;margin-left:4px">{badge}</span>'
+                          if badge else "")
+            return (
+                '<div style="flex:1;min-width:90px">'
+                f'<div class="meta" style="font-size:11px;margin-bottom:2px">{label}</div>'
+                '<div style="display:flex;align-items:center;gap:4px">'
+                f'<span style="font-size:18px;font-weight:bold;color:{color}">${value}</span>'
+                f'{badge_html}'
+                f'<button onclick="copyTP(\'{value}\',this)" title="Copy" '
+                'style="margin:0;padding:3px 6px;font-size:10px;background:#30363d;'
+                'color:#8b949e;width:auto;border:1px solid #30363d;border-radius:4px">📋</button>'
+                '</div></div>'
+            )
+
+        # Options companion (rendered under shares when analyzer attached one)
+        opt = t.get("options") if isinstance(t.get("options"), dict) else None
+        opt_block = ""
+        if opt:
+            opt_type   = str(opt.get("type", "call")).lower()
+            opt_strike = opt.get("strike")
+            opt_exp    = opt.get("expiration", "")
+            opt_entry  = fmt_num(opt.get("entry"))
+            opt_stop   = fmt_num(opt.get("stop_loss"))
+            opt_tgt    = fmt_num(opt.get("target"))
+            opt_rat    = opt.get("rationale", "")
+            opt_color  = "#00ff88" if opt_type == "call" else "#ff6b6b"
+            try:
+                strike_s = f"${float(opt_strike):g}"
+            except Exception:
+                strike_s = "?"
+            contract_label = f"{strike_s} {opt_type.upper()} · {opt_exp}".strip(" ·")
+            opt_block = (
+                '<div style="margin-top:10px;padding:10px;background:#0b1622;'
+                f'border:1px dashed {opt_color}55;border-radius:8px">'
+                '<div style="display:flex;align-items:center;justify-content:space-between;'
+                'flex-wrap:wrap;gap:6px;margin-bottom:8px">'
+                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                f'<span style="font-size:11px;font-weight:bold;color:{opt_color};'
+                'letter-spacing:0.5px">📈 OPTIONS COMPANION</span>'
+                f'<span class="meta" style="font-size:12px;color:#c9d1d9">{contract_label}</span>'
+                '</div>'
+                '</div>'
+                '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">'
+                + cell("Premium",   opt_entry, "#00d4ff")
+                + cell("Stop",      opt_stop,  "#ff6b6b")
+                + cell("Target",    opt_tgt,   "#00ff88")
+                + '</div>'
+                + (f'<div style="font-size:11px;color:#8b949e;line-height:1.5">{opt_rat}</div>'
+                   if opt_rat else "")
+                + '<div style="margin-top:6px;padding:6px 8px;background:#2a1f0d;'
+                'border-left:3px solid #ff9800;border-radius:4px;font-size:11px;color:#ffd700">'
+                '⚠️ Theta starts biting near mid-DTE — set a calendar reminder to reassess.'
+                '</div>'
+                '</div>'
+            )
+
+        cards.append(
+            f'<div style="background:#0d1117;border:1px solid #30363d;border-left:4px solid {dir_color};'
+            'border-radius:10px;padding:14px;margin-bottom:10px">'
+            # Header row: ticker + direction + conviction + horizon
+            '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:10px">'
+            '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+            f'<span style="font-size:20px;font-weight:bold;color:#e6edf3">{ticker}</span>'
+            f'<span style="background:{dir_color};color:#000;padding:2px 8px;border-radius:10px;'
+            f'font-size:11px;font-weight:bold">{direction}</span>'
+            f'<span class="meta" style="font-size:12px">{instrument}</span>'
+            '</div>'
+            f'<span style="background:{conv_color}22;color:{conv_color};padding:2px 8px;'
+            f'border-radius:10px;font-size:11px;font-weight:bold;border:1px solid {conv_color}55">'
+            f'{conviction}</span>'
+            '</div>'
+            # Numbers row
+            '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px">'
+            + cell("Entry",  entry_s,  "#00d4ff")
+            + cell("Stop",   stop_s,   "#ff6b6b", stop_pct_s)
+            + cell("Target", target_s, "#00ff88", target_pct_s)
+            + '</div>'
+            f'<div style="font-size:12px;color:#8b949e;line-height:1.5">'
+            f'<b style="color:#c9d1d9">Horizon:</b> {horizon} &nbsp;·&nbsp; {rationale}'
+            '</div>'
+            + inst_warn
+            + opt_block
+            + '</div>'
+        )
+
+    footer = (
+        '<div style="margin-top:6px;padding:10px;background:#0d1117;border-radius:6px;'
+        'font-size:11px;color:#8b949e;line-height:1.5;border:1px dashed #30363d">'
+        '<b style="color:#c9d1d9">How to use:</b> Open Robinhood → place a limit buy at <b>Entry</b>. '
+        'Once filled, set a stop-loss order at <b>Stop</b> and a limit sell at <b>Target</b> '
+        '(or a trailing stop). Then close the app. No exits, no entry.'
+        + (f'<br><span style="font-size:10px">Generated {ts}</span>' if ts else '')
+        + '</div>'
+    )
+
+    return "".join(cards) + footer
 
 @app.get("/pick-profile", response_class=HTMLResponse)
 async def pick_profile():
@@ -1092,6 +1272,7 @@ async def home(request: Request):
     analysis_html = analysis.replace("\n", "<br>") if analysis else "No analysis yet. Upload a report to Synology first."
 
     track_html = build_track_record_html(get_track_record())
+    trade_plan_html = build_trade_plan_html(get_latest_trade_plan())
 
     _help_json = json.dumps({
         "prices": {
@@ -1135,6 +1316,13 @@ async def home(request: Request):
             "how": "Ask specific, actionable questions. Good examples: 'Should I buy SOXL calls today given the RSI?', 'What has Kevin said about META over the past 3 weeks?', 'Is this a good time to add to my QQQ position?'",
             "tip": "The more specific your question, the better the answer. Instead of 'what should I buy?' try 'Given Kevin was bullish on SOXL last week and RSI is now 82, should I wait for a pullback or scale in now?'",
             "links": [{"label": "How to ask better investment questions", "url": "https://www.investopedia.com/articles/basics/09/how-to-analyze-investments.asp"}, {"label": "Disclaimer: not financial advice", "url": "https://www.investopedia.com/terms/f/financial-advisor.asp"}]
+        },
+        "trade-plan": {
+            "title": "Trade Plan",
+            "what": "A condensed, ready-to-place trade card for each high-conviction setup from today's analysis: entry price, stop-loss, target, % risk, and conviction level. Designed so you can read the numbers off your phone and type them straight into Robinhood without thinking.",
+            "how": "When a new Alpha Report is analyzed, Claude generates up to 3 trades and saves them as JSON. Tap the 📋 button next to any field to copy that number. Open Robinhood → place a limit buy at Entry → once filled, set a stop-loss order at Stop and a limit sell at Target (or use a trailing stop). Then close the app and don't look until the weekly review.",
+            "tip": "For a busy schedule, treat the Trade Plan as instructions, not suggestions: if you don't set the stop-loss the same minute you buy, do not take the trade. Stops are non-negotiable when you can't watch the screen.",
+            "links": [{"label": "How to place a stop-loss on Robinhood", "url": "https://robinhood.com/us/en/support/articles/stop-loss-orders/"}, {"label": "Trailing stop orders explained", "url": "https://www.investopedia.com/terms/t/trailingstop.asp"}]
         },
         "analysis": {
             "title": "Latest Analysis",
@@ -1251,41 +1439,138 @@ async def home(request: Request):
       <title>Invest AI</title>
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <meta http-equiv="refresh" content="300">
+      <link rel="preconnect" href="https://fonts.googleapis.com">
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+      <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..800,0..100&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
       <style>
+        /* ── Design tokens ──────────────────────────── */
+        :root{{
+          --bg:#0a0e14; --bg-elev:#10141d; --bg-deep:#070a10;
+          --surface-1:linear-gradient(180deg,#141a25 0%,#10151e 100%);
+          --border:#1f2735; --border-hot:#2c3548;
+          --text:#e8eaed; --text-soft:#b8c0cd; --text-meta:#7a8493;
+          --teal:#5eead4; --teal-soft:rgba(94,234,212,.12);
+          --cyan:#00d4ff; --gold:#e0b75a; --gold-soft:rgba(224,183,90,.12);
+          --bull:#34d399; --bear:#f87171; --warn:#f59e0b; --violet:#b388ff;
+          --serif:'Fraunces',Georgia,serif;
+          --sans:'Manrope','Segoe UI',sans-serif;
+          --mono:'JetBrains Mono',ui-monospace,monospace;
+        }}
         *{{box-sizing:border-box;margin:0;padding:0}}
         html{{scroll-behavior:smooth}}
-        body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
-              margin:0;padding:15px clamp(12px,2.5vw,36px);background:#0d1117;color:#e6edf3;
-              background-image:radial-gradient(ellipse at 10% 10%,rgba(0,212,255,.04) 0%,transparent 50%),
-                               radial-gradient(ellipse at 90% 90%,rgba(179,136,255,.04) 0%,transparent 50%)}}
-        /* ── Typography ─────────────────────────────── */
-        h1{{color:#00d4ff;font-size:1.8em;margin-bottom:15px;text-shadow:0 0 24px rgba(0,212,255,.35)}}
-        h3{{color:#00d4ff;margin-bottom:10px;display:flex;align-items:center;gap:4px}}
-        /* ── Cards ──────────────────────────────────── */
-        .card{{background:#161b22;padding:20px;border-radius:12px;margin:14px 0;
-               border:1px solid #30363d;transition:box-shadow .25s,transform .2s}}
-        @media(hover:hover){{.card:hover{{box-shadow:0 4px 24px rgba(0,212,255,.07);transform:translateY(-1px)}}}}
+        body{{
+          font-family:var(--sans);
+          font-feature-settings:"ss01","ss02","cv11";
+          margin:0;padding:15px clamp(12px,2.5vw,36px);
+          color:var(--text);background:var(--bg);min-height:100vh;
+          background-image:
+            radial-gradient(ellipse 1100px 750px at 8% -8%,rgba(94,234,212,.07),transparent 55%),
+            radial-gradient(ellipse 950px 700px at 92% -2%,rgba(224,183,90,.05),transparent 60%),
+            radial-gradient(ellipse 1300px 900px at 50% 115%,rgba(179,136,255,.05),transparent 60%),
+            url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .025 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+          background-attachment:fixed;
+        }}
+        /* ── Typography (editorial serif headlines) ── */
+        h1{{
+          font-family:var(--serif);font-weight:500;font-size:clamp(2.1em,4.6vw,3.2em);
+          font-variation-settings:"opsz" 144,"SOFT" 30;
+          letter-spacing:-.025em;line-height:1.02;margin-bottom:18px;
+          background:linear-gradient(96deg,#e8eaed 0%,#5eead4 55%,#e0b75a 100%);
+          -webkit-background-clip:text;background-clip:text;color:transparent;
+          text-shadow:none;
+        }}
+        h3{{
+          font-family:var(--serif);font-weight:500;font-size:1.12em;
+          font-variation-settings:"opsz" 36,"SOFT" 30;
+          letter-spacing:-.012em;color:var(--text);
+          margin-bottom:12px;display:flex;align-items:center;gap:6px;
+        }}
+        /* Monospace data treatment via utility */
+        .num,.price,code,pre{{font-family:var(--mono);font-feature-settings:"tnum","zero"}}
+        /* ── Cards (refined surface + accent rule + staggered reveal) ── */
+        .card{{
+          position:relative;background:var(--surface-1);padding:20px;
+          border-radius:14px;margin:14px 0;border:1px solid var(--border);
+          box-shadow:0 1px 0 rgba(255,255,255,.025) inset,
+                     0 14px 40px -28px rgba(0,0,0,.65),
+                     0 1px 2px rgba(0,0,0,.4);
+          opacity:0;transform:translateY(14px);
+          animation:cardIn .85s cubic-bezier(.16,1,.3,1) forwards;
+          transition:border-color .25s,box-shadow .25s,transform .2s;
+        }}
+        .card::before{{
+          content:"";position:absolute;top:0;left:18px;right:18px;height:1px;
+          background:linear-gradient(90deg,transparent 0%,rgba(94,234,212,.42) 40%,rgba(224,183,90,.32) 75%,transparent 100%);
+          opacity:.55;pointer-events:none;
+        }}
+        @keyframes cardIn{{
+          from{{opacity:0;transform:translateY(14px)}}
+          to{{opacity:1;transform:translateY(0)}}
+        }}
+        /* Stagger up to 14 cards on page load */
+        .card:nth-child(1){{animation-delay:.04s}}
+        .card:nth-child(2){{animation-delay:.10s}}
+        .card:nth-child(3){{animation-delay:.16s}}
+        .card:nth-child(4){{animation-delay:.22s}}
+        .card:nth-child(5){{animation-delay:.28s}}
+        .card:nth-child(6){{animation-delay:.34s}}
+        .card:nth-child(7){{animation-delay:.40s}}
+        .card:nth-child(8){{animation-delay:.46s}}
+        .card:nth-child(9){{animation-delay:.52s}}
+        .card:nth-child(10){{animation-delay:.58s}}
+        .card:nth-child(11){{animation-delay:.64s}}
+        .card:nth-child(12){{animation-delay:.70s}}
+        .card:nth-child(13){{animation-delay:.76s}}
+        .card:nth-child(14){{animation-delay:.82s}}
+        @media(prefers-reduced-motion:reduce){{
+          .card{{opacity:1;transform:none;animation:none}}
+        }}
+        @media(hover:hover){{
+          .card:hover{{
+            border-color:var(--border-hot);
+            box-shadow:0 1px 0 rgba(255,255,255,.04) inset,
+                       0 22px 50px -28px rgba(0,0,0,.75),
+                       0 0 0 1px rgba(94,234,212,.06);
+            transform:translateY(-2px);
+          }}
+        }}
         /* ── Badges ─────────────────────────────────── */
-        .badge{{background:#00d4ff;color:#000;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold}}
-        .badge-green{{background:#00ff88;color:#000;padding:2px 8px;border-radius:10px;font-size:11px;
-                      font-weight:bold;animation:livePulse 2.5s infinite}}
-        @keyframes livePulse{{0%,100%{{box-shadow:0 0 0 0 rgba(0,255,136,.5)}}70%{{box-shadow:0 0 0 7px rgba(0,255,136,0)}}}}
-        /* ── Ticker chips ───────────────────────────── */
-        .ticker{{display:inline-block;background:#0d1117;padding:6px 12px;border-radius:20px;
-                 margin:3px;font-size:13px;border:1px solid #30363d;transition:.15s}}
-        .ticker:hover{{border-color:#00d4ff;color:#00d4ff}}
+        .badge{{background:var(--teal);color:#04130f;padding:3px 10px;border-radius:999px;
+                font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+                font-family:var(--mono)}}
+        .badge-green{{background:var(--bull);color:#03130a;padding:3px 10px;border-radius:999px;
+                      font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+                      font-family:var(--mono);animation:livePulse 2.5s infinite}}
+        @keyframes livePulse{{0%,100%{{box-shadow:0 0 0 0 rgba(52,211,153,.55)}}70%{{box-shadow:0 0 0 8px rgba(52,211,153,0)}}}}
+        /* ── Ticker chips (mono, slab feel) ─────────── */
+        .ticker{{display:inline-block;background:var(--bg-deep);padding:6px 12px;border-radius:6px;
+                 margin:3px;font-size:12px;font-family:var(--mono);font-weight:500;letter-spacing:.03em;
+                 border:1px solid var(--border);color:var(--text-soft);
+                 transition:border-color .18s,color .18s,background .18s,transform .15s}}
+        .ticker:hover{{border-color:var(--teal);color:var(--teal);background:rgba(94,234,212,.06);
+                       transform:translateY(-1px)}}
         /* ── Inputs ─────────────────────────────────── */
-        input{{width:100%;padding:12px;font-size:16px;border-radius:8px;border:1px solid #30363d;
-               margin:8px 0;background:#0d1117;color:#e6edf3;transition:border-color .15s;
-               -webkit-appearance:none}}
-        input:focus{{outline:none;border-color:#00d4ff}}
-        select{{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;
-                padding:10px;font-size:14px;-webkit-appearance:none}}
-        /* ── Buttons ────────────────────────────────── */
-        button{{background:#00d4ff;color:#000;padding:12px;font-size:15px;border:none;
-                border-radius:8px;cursor:pointer;width:100%;font-weight:bold;margin-top:5px;
-                transition:background .15s,transform .1s;-webkit-tap-highlight-color:transparent}}
-        button:hover{{background:#00b8d9}}
+        input{{width:100%;padding:13px 14px;font-size:16px;border-radius:10px;
+               border:1px solid var(--border);margin:8px 0;background:var(--bg-deep);
+               color:var(--text);font-family:var(--sans);
+               transition:border-color .18s,box-shadow .18s;-webkit-appearance:none}}
+        input:focus{{outline:none;border-color:var(--teal);
+                     box-shadow:0 0 0 3px rgba(94,234,212,.14)}}
+        select{{background:var(--bg-deep);color:var(--text);border:1px solid var(--border);
+                border-radius:10px;padding:11px 12px;font-size:14px;font-family:var(--sans);
+                -webkit-appearance:none}}
+        /* ── Buttons (gold accent, mono caps label) ── */
+        button{{background:linear-gradient(180deg,var(--teal) 0%,#34c8b3 100%);
+                color:#04130f;padding:13px;font-size:13px;border:none;
+                border-radius:10px;cursor:pointer;width:100%;font-weight:700;margin-top:5px;
+                font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;
+                box-shadow:0 8px 24px -12px rgba(94,234,212,.55),
+                           0 1px 0 rgba(255,255,255,.15) inset;
+                transition:transform .12s,box-shadow .2s,filter .15s;
+                -webkit-tap-highlight-color:transparent}}
+        button:hover{{filter:brightness(1.08);
+                      box-shadow:0 10px 30px -10px rgba(94,234,212,.7),
+                                 0 1px 0 rgba(255,255,255,.2) inset}}
         button:active{{transform:scale(.97)}}
         /* ── Utility ────────────────────────────────── */
         .meta{{color:#8b949e;font-size:13px}}
@@ -1413,6 +1698,14 @@ async def home(request: Request):
         <span class="meta"><b style="color:#e6edf3">{report_count}</b> reports &nbsp;|&nbsp; Latest: <b style="color:#e6edf3">{report_name or 'None'}</b></span>
         <div id="triggerStatus" style="display:none;margin-top:6px;padding:6px 10px;background:#0d1117;border-radius:6px;font-size:12px"></div>
         <div style="margin-top:12px">{price_html or '<span class="meta">Live prices loading...</span>'}</div>
+      </div>
+
+      <div class="card full" style="border-left:4px solid #00ff88">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+          <h3 style="margin:0">🎯 Trade Plan <button class="help-btn" onclick="showHelp('trade-plan')">?</button></h3>
+          <button onclick="loadTradePlan()" class="btn-sm" title="Refresh trade plan" style="width:auto;margin:0;padding:5px 12px;font-size:12px;background:#161b22;color:#8b949e;border:1px solid #30363d">↻ Refresh</button>
+        </div>
+        <div id="trade-plan-box">{trade_plan_html}</div>
       </div>
 
       <div class="card full">
@@ -2156,6 +2449,93 @@ async def home(request: Request):
           }}).catch(function() {{ alert('Copy failed — select text manually'); }});
         }}
 
+        // ── Trade Plan Card ────────────────────────────────────────────────
+        function copyTP(val, btn) {{
+          if (val === undefined || val === null) return;
+          navigator.clipboard.writeText(String(val)).then(function() {{
+            const orig = btn.innerHTML;
+            btn.innerHTML = '✓';
+            btn.style.background = '#00ff88';
+            btn.style.color = '#000';
+            setTimeout(function() {{
+              btn.innerHTML = orig;
+              btn.style.background = '#30363d';
+              btn.style.color = '#8b949e';
+            }}, 1500);
+          }}).catch(function() {{
+            prompt('Copy this value:', val);
+          }});
+        }}
+
+        async function loadTradePlan() {{
+          const box = document.getElementById('trade-plan-box');
+          if (!box) return;
+          const orig = box.innerHTML;
+          box.innerHTML = '<div class="meta" style="padding:8px 0">Loading trade plan...</div>';
+          try {{
+            const res = await fetch('/trade-plan');
+            const data = await res.json();
+            if (!data.trades || data.trades.length === 0) {{
+              box.innerHTML = '<div style="color:#8b949e;font-size:13px;padding:8px 0">No trade plan for today. Wait for the next Alpha Report or skip the session.</div>';
+              return;
+            }}
+            const ts = data.generated_at ? new Date(data.generated_at).toLocaleString() : '';
+            let html = '';
+            data.trades.slice(0,3).forEach(function(t) {{
+              const dir = (t.direction || 'LONG').toUpperCase();
+              const dirColor = dir === 'LONG' ? '#00ff88' : '#ff6b6b';
+              const conv = (t.conviction || 'MEDIUM').toUpperCase();
+              const convColors = {{HIGH:'#00ff88', MEDIUM:'#ffd700', LOW:'#8b949e'}};
+              const cc = convColors[conv] || '#8b949e';
+              const inst = (t.instrument || 'shares').toLowerCase();
+              const fmt = function(v) {{ return (v===null||v===undefined) ? '?' : Number(v).toFixed(2); }};
+              const fmtPct = function(v) {{
+                if (v===null||v===undefined) return '';
+                const n = Number(v); return (n>=0?'+':'')+n.toFixed(1)+'%';
+              }};
+              const cell = function(label, value, color, badge) {{
+                const b = badge ? '<span style="color:'+color+';font-size:11px;margin-left:4px">'+badge+'</span>' : '';
+                return '<div style="flex:1;min-width:90px">'
+                  + '<div class="meta" style="font-size:11px;margin-bottom:2px">'+label+'</div>'
+                  + '<div style="display:flex;align-items:center;gap:4px">'
+                  + '<span style="font-size:18px;font-weight:bold;color:'+color+'">$'+value+'</span>'
+                  + b
+                  + '<button onclick="copyTP(\\''+value+'\\',this)" title="Copy" style="margin:0;padding:3px 6px;font-size:10px;background:#30363d;color:#8b949e;width:auto;border:1px solid #30363d;border-radius:4px">📋</button>'
+                  + '</div></div>';
+              }};
+              const optWarn = (inst.indexOf('option')>-1 || inst==='calls' || inst==='puts')
+                ? '<div style="margin-top:6px;padding:6px 8px;background:#2a1f0d;border-left:3px solid #ff9800;border-radius:4px;font-size:11px;color:#ffd700">⚠️ Options — set a calendar reminder for the mid-DTE check.</div>'
+                : '';
+              html += '<div style="background:#0d1117;border:1px solid #30363d;border-left:4px solid '+dirColor+';border-radius:10px;padding:14px;margin-bottom:10px">'
+                + '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:10px">'
+                +   '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                +     '<span style="font-size:20px;font-weight:bold;color:#e6edf3">'+(t.ticker||'?')+'</span>'
+                +     '<span style="background:'+dirColor+';color:#000;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold">'+dir+'</span>'
+                +     '<span class="meta" style="font-size:12px">'+inst+'</span>'
+                +   '</div>'
+                +   '<span style="background:'+cc+'22;color:'+cc+';padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold;border:1px solid '+cc+'55">'+conv+'</span>'
+                + '</div>'
+                + '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px">'
+                +   cell('Entry', fmt(t.entry), '#00d4ff', '')
+                +   cell('Stop',  fmt(t.stop_loss), '#ff6b6b', fmtPct(t.stop_pct))
+                +   cell('Target',fmt(t.target),    '#00ff88', fmtPct(t.target_pct))
+                + '</div>'
+                + '<div style="font-size:12px;color:#8b949e;line-height:1.5">'
+                +   '<b style="color:#c9d1d9">Horizon:</b> '+(t.horizon||'')+' · '+(t.rationale||'')
+                + '</div>' + optWarn
+                + '</div>';
+            }});
+            html += '<div style="margin-top:6px;padding:10px;background:#0d1117;border-radius:6px;font-size:11px;color:#8b949e;line-height:1.5;border:1px dashed #30363d">'
+              + '<b style="color:#c9d1d9">How to use:</b> Open Robinhood → limit buy at <b>Entry</b>. Once filled, set a stop-loss at <b>Stop</b> and a limit sell at <b>Target</b>. Then close the app.'
+              + (ts ? '<br><span style="font-size:10px">Generated '+ts+'</span>' : '')
+              + '</div>';
+            box.innerHTML = html;
+          }} catch (e) {{
+            box.innerHTML = orig;
+            console.error('Trade plan load failed', e);
+          }}
+        }}
+
         // ── Item 4: Market Regime ──────────────────────────────────────────
         const _REGIME_COLORS = {{'BULL':'#00ff88','CRASH':'#ff6b6b','BEAR':'#ff9800','CHOPPY':'#ffd700','NEUTRAL':'#ffd700'}};
         const _REGIME_TIPS = {{
@@ -2585,6 +2965,39 @@ async def ask(query: Query, request: Request):
     earnings_context = build_earnings_context()
     regime_context   = build_regime_context()
 
+    # Today's structured analysis + trade plan — same data the dashboard renders
+    latest_analysis = get_latest_analysis() or ""
+    if latest_analysis:
+        # Cap at ~6k chars so the prompt stays cheap; the 10-section narrative
+        # tail is usually the trade-plan JSON we already deliver structured below.
+        latest_analysis = latest_analysis[:6000]
+    trade_plan = get_latest_trade_plan() or {}
+    if trade_plan.get("trades"):
+        try:
+            trade_plan_json = json.dumps(
+                {"generated_at": trade_plan.get("generated_at", ""),
+                 "trades": trade_plan["trades"][:5]},
+                indent=2, default=str,
+            )
+        except Exception:
+            trade_plan_json = ""
+    else:
+        trade_plan_json = ""
+
+    # News headlines for the tickers in scope
+    news_lines = []
+    for t in (query.tickers or [])[:6]:
+        try:
+            articles = get_ticker_news(t, limit=3) or []
+            for a in articles[:3]:
+                title = (a.get("title") or "").strip()
+                pub   = (a.get("published_utc") or a.get("publisher", {}).get("name") or "")[:10]
+                if title:
+                    news_lines.append(f"- [{t}] {pub} — {title}")
+        except Exception:
+            continue
+    news_context = "\n".join(news_lines[:18])
+
     # Volatile context: live prices, user profile, and the question — never cache.
     volatile_block = (
         f"{user_context}"
@@ -2593,9 +3006,14 @@ async def ask(query: Query, request: Request):
         + (f"RSI (14-day):\n{rsi_context}\n\n" if rsi_context else "")
         + (f"LIVE OPTIONS CHAIN (nearest expiry, ATM ±15%):\n{options_context}\n\n" if options_context else "")
         + (f"EARNINGS CALENDAR (estimated dates — verify before trading):\n{earnings_context}\n\n" if earnings_context else "")
+        + (f"TODAY'S TRADE PLAN (shares + optional options companion, exactly what the dashboard shows):\n{trade_plan_json}\n\n" if trade_plan_json else "")
+        + (f"TODAY'S ANALYSIS (10-section breakdown rendered on the dashboard):\n{latest_analysis}\n\n" if latest_analysis else "")
+        + (f"RECENT NEWS HEADLINES (Polygon):\n{news_context}\n\n" if news_context else "")
         + f"Question: {query.question}\n\n"
         "Answer directly and actionably. Reference the user's current positions and recent lookups "
         "when relevant — e.g. if they have SOXL in their watchlist or recently checked SOXL RSI, factor that in.\n"
+        "If TODAY'S TRADE PLAN contains a setup matching the question, quote its entry/stop/target "
+        "(and the options companion strike/expiration if present) verbatim instead of re-deriving them.\n"
         "Reference Kevin's hit rate and past calls on this ticker if available.\n"
         "Flag earnings risk if a ticker has earnings within 14 days.\n"
         "Not personalized financial advice."
@@ -2710,6 +3128,13 @@ async def track_record_api():
     hits     = [t for t in closed if t["outcome"] == "HIT"]
     hit_rate = round(len(hits) / len(closed) * 100) if closed else 0
     return {"trades": trades, "stats": {"total": len(trades), "hit_rate": hit_rate, "closed": len(closed), "open": len(trades) - len(closed)}}
+
+@app.get("/trade-plan")
+async def trade_plan_api():
+    plan = get_latest_trade_plan()
+    if not plan:
+        return {"trades": [], "report": None, "generated_at": None}
+    return plan
 
 @app.get("/news")
 async def ticker_news(request: Request, ticker: str = "SPY", limit: int = 5):

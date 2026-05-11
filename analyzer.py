@@ -242,14 +242,29 @@ def calculate_sentiment_delta(reports):
 
 WATCHED_TICKERS = ["META", "MSFT", "TSLA", "MRVL", "AXON", "RKT", "SOXL", "QQQ", "NVDA"]
 
+def get_watchlist_tickers_from_db():
+    """Return distinct uppercase tickers from the SQLite watchlist."""
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        con = sqlite3.connect(DB_PATH)
+        rows = con.execute("SELECT DISTINCT ticker FROM watchlist").fetchall()
+        con.close()
+        return [r[0].upper() for r in rows if r and r[0]]
+    except Exception as e:
+        print(f"Watchlist DB read error: {e}")
+        return []
+
 def check_upcoming_earnings():
-    """Return list of tickers with earnings within 7 days, using Polygon financials."""
+    """Return list of tickers with earnings within 7 days. Includes hardcoded
+    watch list AND any tickers users have in their SQLite watchlist."""
     key = os.getenv("POLYGON_API_KEY")
     if not key:
         return []
     alerts = []
     today  = datetime.utcnow().date()
-    for ticker in WATCHED_TICKERS:
+    tickers = sorted(set(WATCHED_TICKERS) | set(get_watchlist_tickers_from_db()))
+    for ticker in tickers:
         try:
             r = requests.get(
                 f"https://api.polygon.io/vX/reference/financials",
@@ -342,12 +357,64 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
         "10. TOP 3 ACTIONS: Most important things to do TODAY.\n"
         "    If circuit breaker alerts are active, address them FIRST.\n"
         "    Factor in the regime and sentiment delta.\n\n"
+        "11. TRADE_PLAN_JSON — CRITICAL, MUST BE INCLUDED. If you are running low on\n"
+        "    tokens, truncate or omit earlier sections (1–9) so section 11 always fits.\n"
+        "    Section 11 is the single most important output of this analysis.\n\n"
+        "    Output a SINGLE JSON code block (and absolutely nothing after it) for a\n"
+        "    busy user who places Robinhood orders manually and cannot monitor\n"
+        "    positions intraday. Up to 5 high-conviction setups only — only include\n"
+        "    extras 4–5 if they're genuinely high-conviction; do NOT pad with weak\n"
+        "    ideas. Skip the section entirely (still emit an empty 'trades' array) if\n"
+        "    no setup is clean today.\n\n"
+        "    Each trade is ALWAYS a shares plan (the primary entry). On top of that,\n"
+        "    PREFER adding an 'options' companion whenever the setup fits: directional\n"
+        "    move, clear catalyst window, reasonable IV (not crushed-high, not dead-low),\n"
+        "    and Kevin hasn't warned off options. Pick 45+ DTE to limit theta. Strike =\n"
+        "    near-the-money or one strike OTM in the trade's direction. Skip the\n"
+        "    'options' companion only when the setup is slow/grindy, IV is brutal, or\n"
+        "    Kevin explicitly steers away from contracts.\n\n"
+        "    Use the live prices in the LIVE CONTEXT above for the shares entry / stop /\n"
+        "    target. Shares stop: -5% to -10% from entry (tighter for leveraged ETFs\n"
+        "    like SOXL). Shares target: +10% to +25% based on conviction.\n"
+        "    Options premium entry/stop/target: estimate from the share move using\n"
+        "    rough delta (~0.50 for ATM 45 DTE). Round prices sensibly.\n\n"
+        "    Format (strict — must be parseable JSON):\n"
+        "    ```json\n"
+        "    {\n"
+        "      \"trades\": [\n"
+        "        {\n"
+        "          \"ticker\": \"NVDA\",\n"
+        "          \"direction\": \"LONG\",\n"
+        "          \"instrument\": \"shares\",\n"
+        "          \"entry\": 145.00,\n"
+        "          \"stop_loss\": 137.75,\n"
+        "          \"target\": 165.00,\n"
+        "          \"stop_pct\": -5.0,\n"
+        "          \"target_pct\": 13.8,\n"
+        "          \"conviction\": \"HIGH\",\n"
+        "          \"horizon\": \"2-7 days\",\n"
+        "          \"rationale\": \"One short sentence — why this trade today\",\n"
+        "          \"options\": {\n"
+        "            \"type\": \"call\",\n"
+        "            \"strike\": 150,\n"
+        "            \"expiration\": \"2026-06-20\",\n"
+        "            \"entry\": 5.20,\n"
+        "            \"stop_loss\": 3.50,\n"
+        "            \"target\": 9.50,\n"
+        "            \"rationale\": \"45 DTE call — defined-risk way to play the same move\"\n"
+        "          }\n"
+        "        }\n"
+        "      ]\n"
+        "    }\n"
+        "    ```\n\n"
+        "    Omit the 'options' key entirely (do NOT pass null) when no contract\n"
+        "    companion fits. 'options.type' is 'call' for LONG, 'put' for SHORT.\n\n"
         "Be specific and actionable. Not personalized financial advice."
     )
 
     r = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=3000,
+        max_tokens=8000,
         system=[{
             "type": "text",
             "text": "You are an expert investment research analyst with access to months of Alpha Reports from Kevin.",
@@ -360,9 +427,104 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
     )
     return r.content[0].text
 
+# ── Trade Plan extraction & fallback ─────────────────────────────────────────
+
+def generate_trade_plan_focused(analysis_text, regime=None, risk=None):
+    """Fallback: a focused Haiku call that returns JSON-only trade plans.
+    Used when the main analysis ran out of tokens before reaching section 11."""
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+    live_lines = []
+    if regime:
+        live_lines.append(f"Market regime: {regime['regime']} | SPY ${regime['spy']} | "
+                          f"vol {regime['ann_vol']}%")
+    if risk and risk.get("positions"):
+        live_lines.append("Current positions: " + ", ".join(
+            f"{p['ticker']} entry ${p['entry']} → ${p['current']}" for p in risk["positions"]
+        ))
+    live_block = "\n".join(live_lines) if live_lines else ""
+
+    # Truncate analysis to ~6000 chars to keep prompt small
+    snippet = analysis_text[:6000] if analysis_text else ""
+
+    prompt = (
+        "You generate structured trade plans for a busy investor who cannot monitor "
+        "positions intraday. Read the analysis below and output ONLY a JSON object — "
+        "no markdown fences, no commentary, no explanation. Up to 5 high-conviction "
+        "setups (don't pad — extras 4–5 must clear the same bar). Each trade is "
+        "ALWAYS a shares plan. PREFER adding an 'options' "
+        "companion (45+ DTE, ATM/one-strike-OTM) whenever the setup is directional "
+        "with a clear catalyst window and IV isn't crushed-high. Omit the 'options' "
+        "key (do NOT pass null) when contracts don't fit. Shares stop -5% to -10% "
+        "(-7% to -10% leveraged ETFs). Shares target +10% to +25%. Options premium "
+        "entry/stop/target: estimate from the share move via rough delta (~0.50 ATM "
+        "45 DTE). 'options.type' is 'call' for LONG, 'put' for SHORT. If no clean "
+        "setup exists, output {\"trades\": []}.\n\n"
+        f"{live_block}\n\n"
+        f"ANALYSIS:\n{snippet}\n\n"
+        "Output JSON only, exact schema (options companion optional):\n"
+        '{"trades":[{"ticker":"NVDA","direction":"LONG","instrument":"shares",'
+        '"entry":145.00,"stop_loss":137.75,"target":165.00,"stop_pct":-5.0,'
+        '"target_pct":13.8,"conviction":"HIGH","horizon":"2-7 days",'
+        '"rationale":"one short sentence","options":{"type":"call","strike":150,'
+        '"expiration":"2026-06-20","entry":5.20,"stop_loss":3.50,"target":9.50,'
+        '"rationale":"45 DTE — defined-risk version of the same move"}}]}'
+    )
+    try:
+        r = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = r.content[0].text.strip()
+        # Strip code fences if Haiku ignored instructions
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+        # Direct parse
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        # Extract first {...} blob
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception as e:
+                print(f"  Fallback JSON parse failed: {e}")
+        return None
+    except Exception as e:
+        print(f"  Focused trade plan call failed: {e}")
+        return None
+
+
+def extract_trade_plan(text):
+    """Pull the final ```json {...} ``` block out of Claude's response.
+    Returns (clean_narrative_without_json, trade_plan_dict_or_None)."""
+    if not text:
+        return text, None
+    # Look for the last fenced ```json ... ``` block
+    pattern = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return text, None
+    last = matches[-1]
+    try:
+        plan = json.loads(last.group(1))
+    except Exception as e:
+        print(f"Trade plan JSON parse failed: {e}")
+        return text, None
+    if not isinstance(plan, dict) or "trades" not in plan:
+        return text, None
+    # Strip the JSON block (and any "11. TRADE_PLAN_JSON" heading just before it) from narrative
+    clean = text[:last.start()].rstrip()
+    # also strip a trailing "11. TRADE_PLAN_JSON:" header if present
+    clean = re.sub(r"\n*\s*1?1\.\s*TRADE[_ ]PLAN[_ ]JSON.*$", "", clean,
+                   flags=re.IGNORECASE | re.DOTALL).rstrip()
+    return clean, plan
+
 # ── Notification ──────────────────────────────────────────────────────────────
 
-def notify_home_assistant(report_name, sentiment_delta=None, regime=None, risk=None, earnings_alerts=None):
+def notify_home_assistant(report_name, sentiment_delta=None, regime=None, risk=None, earnings_alerts=None, trade_plan=None):
     ha_url   = os.getenv("HA_URL", "").rstrip("/")
     ha_token = os.getenv("HA_TOKEN", "")
     ha_svc   = os.getenv("HA_NOTIFY_SERVICE", "notify")
@@ -394,7 +556,11 @@ def notify_home_assistant(report_name, sentiment_delta=None, regime=None, risk=N
                 f"{e['ticker']} in {e['days_away']}d" for e in ea
             ))
 
-        parts.append("Open dashboard → Top 3 Actions")
+        if trade_plan and trade_plan.get("trades"):
+            tickers = ", ".join(t.get("ticker", "?") for t in trade_plan["trades"][:3])
+            parts.append(f"🎯 TRADE PLAN: {tickers} — see dashboard for entry/stop/target")
+
+        parts.append("Open dashboard → Top 3 Actions + Trade Plan")
 
         r = requests.post(
             f"{ha_url}/api/services/notify/{ha_svc}",
@@ -449,6 +615,31 @@ def main():
     print(f"Analyzing {len(reports)} reports with Claude...")
     result = analyze_with_claude(reports, regime=regime, risk=risk, sentiment_delta=sd)
 
+    print("Extracting trade plan JSON...")
+    narrative, trade_plan = extract_trade_plan(result)
+    if not trade_plan or not trade_plan.get("trades"):
+        print("  Main analysis missing trade plan — running focused fallback call...")
+        fallback = generate_trade_plan_focused(narrative or result, regime=regime, risk=risk)
+        if fallback and fallback.get("trades") is not None:
+            trade_plan = fallback
+            print(f"  Fallback returned {len(trade_plan['trades'])} trades")
+    if trade_plan and trade_plan.get("trades"):
+        plan_path = os.path.join(RESULTS_DIR, f"{base}_trade_plan.json")
+        with open(plan_path, "w") as f:
+            json.dump({
+                "report": latest_name,
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "trades": trade_plan["trades"],
+            }, f, indent=2)
+        print(f"  Trade plan saved ({len(trade_plan['trades'])} trades) → {plan_path}")
+        for t in trade_plan["trades"]:
+            print(f"    {t.get('ticker','?')} {t.get('direction','')} "
+                  f"entry ${t.get('entry','?')} | stop ${t.get('stop_loss','?')} "
+                  f"({t.get('stop_pct','?')}%) | target ${t.get('target','?')} "
+                  f"({t.get('target_pct','?')}%) | {t.get('conviction','?')}")
+    else:
+        print("  No trade plan extracted")
+
     with open(out, "w") as f:
         f.write(f"Report: {latest_name}\n")
         f.write(f"Reports used: {len(reports)}\n")
@@ -463,9 +654,9 @@ def main():
             for a in risk["alerts"]:
                 f.write(f"  {a}\n")
         f.write("=" * 60 + "\n\n")
-        f.write(result)
+        f.write(narrative)
 
-    print(result)
+    print(narrative)
     print(f"\nSaved to: {out}")
 
     print("Checking upcoming earnings...")
@@ -477,6 +668,7 @@ def main():
         print("  No earnings within 7 days for watched tickers")
 
     notify_home_assistant(latest_name, sentiment_delta=sd, regime=regime,
-                          risk=risk, earnings_alerts=earnings_alerts)
+                          risk=risk, earnings_alerts=earnings_alerts,
+                          trade_plan=trade_plan)
 
 main()
