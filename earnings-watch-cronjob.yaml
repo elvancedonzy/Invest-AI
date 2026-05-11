@@ -4,8 +4,10 @@ metadata:
   name: earnings-watch
   namespace: invest-ai
 spec:
-  # 12:30 UTC daily ≈ 7:30am EST / 8:30am EDT — before the trading day.
-  schedule: "30 12 * * *"
+  # Twice on weekdays: 12:30 UTC (~7:30am EST / 8:30am EDT, pre-open) and
+  # 18:30 UTC (~1:30pm EST / 2:30pm EDT, mid-day) — second push catches
+  # anyone who missed the morning notification.
+  schedule: "30 12,18 * * 1-5"
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 2
   jobTemplate:
