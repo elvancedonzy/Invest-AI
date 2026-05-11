@@ -36,6 +36,11 @@ spec:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: POLYGON_API_KEY
+            - name: TRADIER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: TRADIER_TOKEN
             - name: HA_URL
               valueFrom:
                 secretKeyRef:

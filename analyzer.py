@@ -152,6 +152,125 @@ _TICKER_STOPWORDS = {
     "AI","ML","UI","UX","API","CRM","SAAS","LLM","GPT","ATH","ATL",
 }
 
+# ── Tradier options chain (deterministic options-companion attachment) ───────
+
+def _tradier_expirations(ticker):
+    token = os.getenv("TRADIER_TOKEN")
+    if not token:
+        return []
+    try:
+        r = requests.get(
+            "https://api.tradier.com/v1/markets/options/expirations",
+            params={"symbol": ticker, "includeAllRoots": "true", "strikes": "false"},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=6,
+        )
+        dates = r.json().get("expirations", {}).get("date", [])
+        return dates if isinstance(dates, list) else [dates]
+    except Exception as e:
+        print(f"  Tradier expirations({ticker}) failed: {e}")
+        return []
+
+def _tradier_chain(ticker, expiration):
+    token = os.getenv("TRADIER_TOKEN")
+    if not token:
+        return None
+    try:
+        r = requests.get(
+            "https://api.tradier.com/v1/markets/options/chains",
+            params={"symbol": ticker, "expiration": expiration, "greeks": "false"},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        raw = (r.json().get("options") or {}).get("option", [])
+        if isinstance(raw, dict):
+            raw = [raw]
+        return raw
+    except Exception as e:
+        print(f"  Tradier chain({ticker}, {expiration}) failed: {e}")
+        return None
+
+def _pick_expiration(expirations, target_dte=45):
+    """Pick the listed expiration closest to target DTE from today."""
+    if not expirations:
+        return None
+    today = datetime.utcnow().date()
+    best, best_gap = None, None
+    for e in expirations:
+        try:
+            d = datetime.fromisoformat(e).date()
+        except Exception:
+            continue
+        dte = (d - today).days
+        if dte < 14:  # too short — theta will dominate
+            continue
+        gap = abs(dte - target_dte)
+        if best_gap is None or gap < best_gap:
+            best, best_gap = e, gap
+    return best
+
+def attach_options_companions(trades, *, target_dte=45):
+    """For each shares trade, attach a real options companion from the Tradier
+    chain — ATM call (LONG) or ATM put (SHORT). Overwrites any model-generated
+    options block. Drops the block silently if no usable chain is available."""
+    if not os.getenv("TRADIER_TOKEN"):
+        print("  TRADIER_TOKEN not set — skipping options companions")
+        for t in trades:
+            t["options"] = None
+        return
+    for t in trades:
+        ticker = str(t.get("ticker", "")).upper()
+        direction = str(t.get("direction", "LONG")).upper()
+        entry = t.get("entry")
+        if not ticker or not entry:
+            t["options"] = None
+            continue
+        exps = _tradier_expirations(ticker)
+        exp  = _pick_expiration(exps, target_dte=target_dte)
+        if not exp:
+            t["options"] = None
+            continue
+        chain = _tradier_chain(ticker, exp)
+        if not chain:
+            t["options"] = None
+            continue
+        opt_type = "call" if direction == "LONG" else "put"
+        same_type = [o for o in chain if o.get("option_type") == opt_type and o.get("strike")]
+        if not same_type:
+            t["options"] = None
+            continue
+        # ATM: closest strike to entry
+        atm = min(same_type, key=lambda o: abs(float(o["strike"]) - float(entry)))
+        bid = atm.get("bid") or 0
+        ask = atm.get("ask") or 0
+        last = atm.get("last") or 0
+        # Use the ask (what you actually pay buying calls); fall back to last if no ask
+        opt_entry = float(ask) if ask else float(last)
+        if not opt_entry or opt_entry <= 0:
+            t["options"] = None
+            continue
+        # Stop = 50% of premium paid (standard options stop rule for premium buyers)
+        # Target = 2× premium paid (≈ 100% gain — typical for ATM 45 DTE on a ~13% underlying move)
+        opt_stop   = round(opt_entry * 0.50, 2)
+        opt_target = round(opt_entry * 2.00, 2)
+        t["options"] = {
+            "type": opt_type,
+            "strike": float(atm["strike"]),
+            "expiration": exp,
+            "entry": round(opt_entry, 2),
+            "stop_loss": opt_stop,
+            "target": opt_target,
+            "rationale": (f"ATM {opt_type} ~{_dte(exp)} DTE; real Tradier ask used. "
+                          f"Stop at 50% of premium, target at 100% gain. "
+                          f"(bid {bid} / ask {ask})"),
+        }
+
+def _dte(expiration):
+    try:
+        return (datetime.fromisoformat(expiration).date() - datetime.utcnow().date()).days
+    except Exception:
+        return "?"
+
 def _extract_candidate_tickers(reports, max_tickers=40):
     """Pull tickers from today's report plus the last 5. Look for $TICKER and bare
     1–5 letter uppercase tokens. Filter against a stopword list. We deliberately
@@ -444,26 +563,14 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None, l
         "        (Reward:risk ≥ 1.5:1. A 5% stop demands at least a 7.5% target.)\n"
         "      • At most 2 trades may be HIGH conviction. The rest are MEDIUM-HIGH,\n"
         "        MEDIUM, or LOW. Conviction inflation defeats the point of ranking.\n\n"
-        "    Each trade is ALWAYS a shares plan (the primary entry). On top of that,\n"
-        "    PREFER adding an 'options' companion whenever the setup fits: directional\n"
-        "    move, clear catalyst window, reasonable IV (not crushed-high, not dead-low),\n"
-        "    and Kevin hasn't warned off options. Pick 45+ DTE to limit theta. Strike =\n"
-        "    near-the-money or one strike OTM in the trade's direction. Skip the\n"
-        "    'options' companion only when the setup is slow/grindy, IV is brutal, or\n"
-        "    Kevin explicitly steers away from contracts.\n\n"
-        "    OPTIONS COMPANION RULES:\n"
-        "      • SINGLE-LEG ONLY: one contract, one strike. Do NOT propose spreads\n"
-        "        (no bull_call_spread, bear_put_spread, iron_condor, etc.) — the\n"
-        "        schema below has exactly one 'strike' field and no others.\n"
-        "      • 'type' is 'call' for LONG, 'put' for SHORT. Never 'credit'/'debit'.\n"
-        "      • The options entry premium must be a positive number (a debit you pay).\n"
-        "      • Target premium ≤ ~2× entry premium for ATM 45 DTE — anything beyond\n"
-        "        that implies a move the shares plan itself isn't promising.\n\n"
+        "    Each trade is a SHARES plan only. DO NOT include an 'options' key — a\n"
+        "    separate post-processing step attaches the real options companion using\n"
+        "    live Tradier chain data (real strikes, expirations, bid/ask). Anything\n"
+        "    you put in 'options' will be discarded.\n\n"
         "    Shares stop: -5% to -10% from entry (tighter for leveraged ETFs like\n"
         "    SOXL/TQQQ). Shares target: +10% to +25%, but always ≥1.5× stop distance.\n"
-        "    Options premium entry/stop/target: estimate from the share move using\n"
-        "    rough delta (~0.50 for ATM 45 DTE). Round prices sensibly.\n\n"
-        "    Format (strict — must be parseable JSON):\n"
+        "    Round prices sensibly.\n\n"
+        "    Format (strict — must be parseable JSON, shares-only schema):\n"
         "    ```json\n"
         "    {\n"
         "      \"trades\": [\n"
@@ -478,22 +585,11 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None, l
         "          \"target_pct\": 13.8,\n"
         "          \"conviction\": \"HIGH\",\n"
         "          \"horizon\": \"2-7 days\",\n"
-        "          \"rationale\": \"One short sentence — why this trade today\",\n"
-        "          \"options\": {\n"
-        "            \"type\": \"call\",\n"
-        "            \"strike\": 150,\n"
-        "            \"expiration\": \"2026-06-20\",\n"
-        "            \"entry\": 5.20,\n"
-        "            \"stop_loss\": 3.50,\n"
-        "            \"target\": 9.50,\n"
-        "            \"rationale\": \"45 DTE call — defined-risk way to play the same move\"\n"
-        "          }\n"
+        "          \"rationale\": \"One short sentence — why this trade today\"\n"
         "        }\n"
         "      ]\n"
         "    }\n"
         "    ```\n\n"
-        "    Omit the 'options' key entirely (do NOT pass null) when no contract\n"
-        "    companion fits. 'options.type' is 'call' for LONG, 'put' for SHORT.\n\n"
         "Be specific and actionable. Not personalized financial advice."
     )
 
@@ -539,32 +635,24 @@ def generate_trade_plan_focused(analysis_text, regime=None, risk=None, live_pric
         "You generate structured trade plans for a busy investor who cannot monitor "
         "positions intraday. Read the analysis below and output ONLY a JSON object — "
         "no markdown fences, no commentary, no explanation. Up to 5 high-conviction "
-        "setups (don't pad — extras 4–5 must clear the same bar). Each trade is "
-        "ALWAYS a shares plan. PREFER adding an 'options' "
-        "companion (45+ DTE, ATM/one-strike-OTM) whenever the setup is directional "
-        "with a clear catalyst window and IV isn't crushed-high. Omit the 'options' "
-        "key (do NOT pass null) when contracts don't fit.\n\n"
+        "setups (don't pad — extras 4–5 must clear the same bar). Each trade is a "
+        "SHARES plan only — do NOT include an 'options' key; a separate post-step "
+        "attaches the real Tradier options companion.\n\n"
         "HARD RULES (any violating trade will be discarded):\n"
         "  • Ticker MUST be in the LIVE TICKER UNIVERSE; use that exact spot price.\n"
         "  • Entry within ±2% of spot. If you want a pullback entry farther away,\n"
         "    skip the trade — it's a watchlist alert, not a plan.\n"
         "  • Target distance from entry ≥ 1.5× the stop distance (R:R ≥ 1.5:1).\n"
-        "  • At most 2 trades may be HIGH conviction.\n"
-        "  • Options: SINGLE-LEG ONLY (one 'strike' field). No spreads.\n"
-        "  • Options 'type' is 'call' for LONG, 'put' for SHORT.\n\n"
+        "  • At most 2 trades may be HIGH conviction.\n\n"
         "Shares stop -5% to -10% (-7% to -10% leveraged ETFs). Shares target +10% "
-        "to +25%. Options premium entry/stop/target: estimate from the share move "
-        "via rough delta (~0.50 ATM 45 DTE). If no clean setup exists, output "
-        "{\"trades\": []}.\n\n"
+        "to +25%. If no clean setup exists, output {\"trades\": []}.\n\n"
         f"{live_block}\n\n"
         f"ANALYSIS:\n{snippet}\n\n"
-        "Output JSON only, exact schema (options companion optional, single-leg):\n"
+        "Output JSON only, exact shares-only schema:\n"
         '{"trades":[{"ticker":"NVDA","direction":"LONG","instrument":"shares",'
         '"entry":145.00,"stop_loss":137.75,"target":165.00,"stop_pct":-5.0,'
         '"target_pct":13.8,"conviction":"HIGH","horizon":"2-7 days",'
-        '"rationale":"one short sentence","options":{"type":"call","strike":150,'
-        '"expiration":"2026-06-20","entry":5.20,"stop_loss":3.50,"target":9.50,'
-        '"rationale":"45 DTE — defined-risk version of the same move"}}]}'
+        '"rationale":"one short sentence"}]}'
     )
     try:
         r = client.messages.create(
@@ -685,35 +773,12 @@ def validate_trade_plan(plan, live_prices, *, entry_tolerance_pct=2.0,
         if rr < min_rr:
             rejected.append(f"{ticker}: R:R {rr:.2f} < {min_rr} — dropped"); continue
 
-        # Options companion validation — strip block if structurally wrong,
-        # but keep the shares trade.
-        opt = t.get("options")
-        if isinstance(opt, dict):
-            extras = set(opt.keys()) - _OPTIONS_ALLOWED_FIELDS
-            if extras:
-                rejected.append(f"{ticker}: stripped options block with "
-                                f"unexpected fields {sorted(extras)}")
-                t["options"] = None
-            else:
-                try:
-                    opt_entry  = float(opt.get("entry"))
-                    opt_stop   = float(opt.get("stop_loss"))
-                    opt_target = float(opt.get("target"))
-                    strike     = float(opt.get("strike"))
-                except (TypeError, ValueError):
-                    rejected.append(f"{ticker}: stripped options block — non-numeric")
-                    t["options"] = None
-                else:
-                    bad = (opt_entry <= 0 or opt_stop <= 0 or opt_target <= 0
-                           or strike <= 0
-                           or opt_target > opt_entry * 2.5  # impossible target
-                           or opt_stop >= opt_entry)        # stop must be below entry
-                    if bad:
-                        rejected.append(f"{ticker}: stripped options block — "
-                                        f"impossible math (entry {opt_entry}, "
-                                        f"stop {opt_stop}, target {opt_target}, "
-                                        f"strike {strike})")
-                        t["options"] = None
+        # Always strip model-generated options blocks. The deterministic
+        # attach_options_companions() step replaces them with real Tradier
+        # chain data after validation. The model has no way to know real
+        # IV/premiums and was wildly wrong (entries off by 2-7x).
+        if t.get("options") is not None:
+            t["options"] = None
 
         # Recompute the percentage fields against the validated entry/spot
         try:
@@ -853,6 +918,18 @@ def main():
         print(f"  Validation: kept {after}/{before} trades")
         for r in rejections:
             print(f"    • {r}")
+
+    if trade_plan and trade_plan.get("trades"):
+        print("Attaching options companions from Tradier chains...")
+        attach_options_companions(trade_plan["trades"])
+        for t in trade_plan["trades"]:
+            opt = t.get("options")
+            if opt:
+                print(f"    {t['ticker']}: {opt['type'].upper()} ${opt['strike']:g} "
+                      f"{opt['expiration']} — ask ${opt['entry']} "
+                      f"(stop ${opt['stop_loss']}, target ${opt['target']})")
+            else:
+                print(f"    {t['ticker']}: no options companion")
 
     if trade_plan and trade_plan.get("trades"):
         plan_path = os.path.join(RESULTS_DIR, f"{base}_trade_plan.json")
