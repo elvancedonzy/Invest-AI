@@ -57,6 +57,11 @@ def init_db():
                 created_at TEXT    DEFAULT (datetime('now')),
                 FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
         """)
         # add avatar column if upgrading from older schema
         try:
@@ -92,6 +97,24 @@ def db_create_profile(name, color, avatar="📈"):
 def db_delete_profile(pid):
     with get_db() as con:
         con.execute("DELETE FROM profiles WHERE id=?", (pid,))
+
+# ── Settings helpers (global key-value, shared with analyzer) ─────────────────
+
+def get_setting(key, default=None):
+    try:
+        with get_db() as con:
+            r = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            return r["value"] if r else default
+    except Exception:
+        return default
+
+def set_setting(key, value):
+    with get_db() as con:
+        con.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES(?, ?, datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')",
+            (key, str(value))
+        )
 
 # ── Watchlist helpers ─────────────────────────────────────────────────────────
 
@@ -1703,7 +1726,15 @@ async def home(request: Request):
       <div class="card full" style="border-left:4px solid #00ff88">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
           <h3 style="margin:0">🎯 Trade Plan <button class="help-btn" onclick="showHelp('trade-plan')">?</button></h3>
-          <button onclick="loadTradePlan()" class="btn-sm" title="Refresh trade plan" style="width:auto;margin:0;padding:5px 12px;font-size:12px;background:#161b22;color:#8b949e;border:1px solid #30363d">↻ Refresh</button>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="meta" style="font-size:12px">
+              Options budget:
+              <b id="options-budget-display" style="color:#e6edf3">…</b>
+              <button onclick="editOptionsBudget()" title="Edit options budget cap"
+                style="margin:0 0 0 4px;padding:3px 8px;font-size:11px;width:auto;background:#161b22;color:#8b949e;border:1px solid #30363d;border-radius:4px">✎ edit</button>
+            </span>
+            <button onclick="loadTradePlan()" class="btn-sm" title="Refresh trade plan" style="width:auto;margin:0;padding:5px 12px;font-size:12px;background:#161b22;color:#8b949e;border:1px solid #30363d">↻ Refresh</button>
+          </div>
         </div>
         <div id="trade-plan-box">{trade_plan_html}</div>
       </div>
@@ -2449,6 +2480,54 @@ async def home(request: Request):
           }}).catch(function() {{ alert('Copy failed — select text manually'); }});
         }}
 
+        // ── Options Budget Editor ──────────────────────────────────────────
+        async function loadOptionsBudget() {{
+          try {{
+            const r = await fetch('/settings/options-budget');
+            const d = await r.json();
+            const el = document.getElementById('options-budget-display');
+            if (el && d.budget !== undefined) {{
+              el.innerText = '$' + Number(d.budget).toLocaleString();
+            }}
+          }} catch (e) {{ /* leave the … placeholder */ }}
+        }}
+        async function editOptionsBudget() {{
+          const current = document.getElementById('options-budget-display').innerText.replace(/[^0-9.]/g,'');
+          const next = prompt(
+            'Options budget per contract (premium × 100, $50–$50,000):\\n\\n' +
+            'Higher = more options companions attached but bigger per-trade risk.\\n' +
+            'Lower = more setups will be shares-only.',
+            current || '500'
+          );
+          if (next === null) return;
+          const n = parseFloat(next);
+          if (isNaN(n) || n < 50 || n > 50000) {{
+            alert('Budget must be a number between $50 and $50,000.');
+            return;
+          }}
+          try {{
+            const r = await fetch('/settings/options-budget', {{
+              method: 'POST',
+              headers: {{ 'Content-Type': 'application/json' }},
+              body: JSON.stringify({{ budget: n }})
+            }});
+            const d = await r.json();
+            if (d.error) {{ alert(d.error); return; }}
+            await loadOptionsBudget();
+            // Hint that the new budget applies to the NEXT analyzer run
+            const hint = document.createElement('div');
+            hint.style.cssText = 'margin-top:6px;padding:6px 10px;background:#0d1f17;border:1px solid #00ff8855;border-radius:6px;font-size:11px;color:#00ff88';
+            hint.innerText = '✓ Saved $' + n.toLocaleString() + '. Applies to the next analyzer run (re-run via ▶ Run Now to apply immediately).';
+            const box = document.getElementById('trade-plan-box');
+            if (box) {{
+              box.parentNode.insertBefore(hint, box);
+              setTimeout(function() {{ hint.remove(); }}, 6000);
+            }}
+          }} catch (e) {{
+            alert('Save failed: ' + e.message);
+          }}
+        }}
+
         // ── Trade Plan Card ────────────────────────────────────────────────
         function copyTP(val, btn) {{
           if (val === undefined || val === null) return;
@@ -2871,6 +2950,7 @@ async def home(request: Request):
         loadBacktest();
         loadCorrelation();
         loadMonteCarlo();
+        loadOptionsBudget();
       </script>
       <div class="quick-bar" id="quickBar">
         <span class="chip" onclick="quickAsk('SOXL signal today — RSI, MACD, and Kevin conviction?')">⚡ SOXL</span>
@@ -3135,6 +3215,28 @@ async def trade_plan_api():
     if not plan:
         return {"trades": [], "report": None, "generated_at": None}
     return plan
+
+@app.get("/settings/options-budget")
+async def get_options_budget():
+    """Read the current options-companion budget cap (premium × 100).
+    Falls back to OPTIONS_BUDGET env var, then $500."""
+    val = get_setting("options_budget", os.getenv("OPTIONS_BUDGET", "500"))
+    try:
+        return {"budget": float(val)}
+    except (TypeError, ValueError):
+        return {"budget": 500.0}
+
+@app.post("/settings/options-budget")
+async def set_options_budget(request: Request):
+    body = await request.json()
+    try:
+        budget = float(body.get("budget"))
+    except (TypeError, ValueError):
+        return {"error": "budget must be a number"}
+    if budget < 50 or budget > 50000:
+        return {"error": "budget must be between $50 and $50,000"}
+    set_setting("options_budget", round(budget, 2))
+    return {"budget": round(budget, 2), "saved": True}
 
 @app.get("/news")
 async def ticker_news(request: Request, ticker: str = "SPY", limit: int = 5):

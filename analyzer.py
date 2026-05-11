@@ -209,6 +209,24 @@ def _pick_expiration(expirations, target_dte=45):
             best, best_gap = e, gap
     return best
 
+def _get_options_budget():
+    """Read budget from the shared settings table (set via dashboard UI).
+    Fall back to OPTIONS_BUDGET env var, then $500. Errors are swallowed —
+    a missing setting must never block the analyzer."""
+    try:
+        if os.path.exists(DB_PATH):
+            con = sqlite3.connect(DB_PATH)
+            r = con.execute("SELECT value FROM settings WHERE key='options_budget'").fetchone()
+            con.close()
+            if r and r[0]:
+                return float(r[0])
+    except Exception as e:
+        print(f"  settings lookup failed: {e}")
+    try:
+        return float(os.getenv("OPTIONS_BUDGET", "500"))
+    except (TypeError, ValueError):
+        return 500.0
+
 def attach_options_companions(trades, *, budget=None, min_dte=14, max_dte=50):
     """For each shares trade, attach a real options companion priced at or
     under `budget` (premium × 100). Walks expirations longest-DTE-first within
@@ -217,10 +235,7 @@ def attach_options_companions(trades, *, budget=None, min_dte=14, max_dte=50):
     gives the highest-delta contract you can afford. Drops the block if no
     contract fits — shares-only is honest, fake premiums are not."""
     if budget is None:
-        try:
-            budget = float(os.getenv("OPTIONS_BUDGET", "500"))
-        except (TypeError, ValueError):
-            budget = 500.0
+        budget = _get_options_budget()
     if not os.getenv("TRADIER_TOKEN"):
         print("  TRADIER_TOKEN not set — skipping options companions")
         for t in trades:
