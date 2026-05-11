@@ -112,6 +112,66 @@ def get_market_regime():
         print(f"Regime detection error: {e}")
         return None
 
+# ── Live Snapshot Prices (used both for portfolio risk and trade-plan grounding) ──
+
+def _fetch_snapshot_prices(tickers):
+    """Return {ticker: price} from Alpaca snapshots. Empty dict on failure."""
+    if not tickers:
+        return {}
+    key    = os.getenv("ALPACA_API_KEY")
+    secret = os.getenv("ALPACA_SECRET_KEY")
+    if not key:
+        return {}
+    try:
+        r = requests.get(
+            "https://data.alpaca.markets/v2/stocks/snapshots",
+            params={"symbols": ",".join(sorted(set(tickers)))},
+            headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+            timeout=8,
+        )
+        data = r.json()
+        out = {}
+        for t, snap in data.items():
+            p = (snap or {}).get("latestTrade", {}).get("p", 0)
+            if p:
+                out[t] = float(p)
+        return out
+    except Exception as e:
+        print(f"Snapshot price fetch error: {e}")
+        return {}
+
+# Words that look like tickers but aren't. Keep this tight — false negatives are
+# fine (we still ground against Alpaca), false positives waste an API slot.
+_TICKER_STOPWORDS = {
+    "A","I","AM","PM","AN","AND","ANY","ARE","AS","AT","BE","BUT","BY","CAN","DO",
+    "EOD","ETA","ETF","FED","FOMC","FOR","FROM","GDP","HAS","HE","I","IF","IN","IS",
+    "IT","ITS","JOB","ME","MY","NEW","NO","NOT","NOW","OF","OK","ON","OR","OUR","OUT",
+    "PER","RSI","SO","THE","TO","UP","US","USA","USD","VS","WAS","WE","WHO","WHY",
+    "WILL","WITH","YOU","YOUR","CPI","PCE","PPI","NFP","MA","IPO","CEO","CFO","IV",
+    "ATM","ITM","OTM","DTE","TLDR","FYI","Q1","Q2","Q3","Q4","YTD","DD","YOY","MOM",
+    "AI","ML","UI","UX","API","CRM","SAAS","LLM","GPT","ATH","ATL",
+}
+
+def _extract_candidate_tickers(reports, max_tickers=40):
+    """Pull tickers from today's report plus the last 5. Look for $TICKER and bare
+    1–5 letter uppercase tokens. Filter against a stopword list. We deliberately
+    cast a wide net — the price fetch will silently drop unknown symbols."""
+    if not reports:
+        return []
+    # Today plus last 5 (overlap fine)
+    window = reports[-6:] if len(reports) > 6 else reports
+    blob = "\n".join(r["content"] for r in window)
+    # $TICKER form gets priority (high confidence)
+    dollared = set(re.findall(r"\$([A-Z]{1,5})\b", blob))
+    # Bare uppercase — noisier, filter aggressively
+    bare = set(re.findall(r"\b([A-Z]{2,5})\b", blob)) - _TICKER_STOPWORDS
+    # Always include the hard-coded watch list + DB watchlist
+    extras = set(WATCHED_TICKERS) | set(get_watchlist_tickers_from_db())
+    # Order: dollared first (highest signal), then watchlist, then bare
+    ordered = list(dollared) + [t for t in extras if t not in dollared] + \
+              [t for t in bare if t not in dollared and t not in extras]
+    return ordered[:max_tickers]
+
 # ── Item 1: Portfolio Risk / Circuit Breakers ─────────────────────────────────
 
 def get_portfolio_risk():
@@ -296,7 +356,7 @@ def check_upcoming_earnings():
 
 # ── Claude Analysis ───────────────────────────────────────────────────────────
 
-def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
+def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None, live_prices=None):
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     history_summary          = build_history_context(reports)
@@ -304,6 +364,14 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
     stable_block = f"HISTORICAL CONTEXT ({len(reports)-1} reports from archive):\n{history_summary}"
 
     live_parts = []
+
+    if live_prices:
+        price_lines = "\n".join(f"  {t}: ${p:.2f}" for t, p in sorted(live_prices.items()))
+        live_parts.append(
+            "LIVE TICKER UNIVERSE — these are the ONLY tickers you may propose trades for.\n"
+            "Use these exact spot prices to anchor entry/stop/target. Do NOT invent prices.\n"
+            f"{price_lines}"
+        )
 
     if regime:
         live_parts.append(
@@ -366,6 +434,16 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
         "    extras 4–5 if they're genuinely high-conviction; do NOT pad with weak\n"
         "    ideas. Skip the section entirely (still emit an empty 'trades' array) if\n"
         "    no setup is clean today.\n\n"
+        "    HARD RULES — any trade that violates these will be discarded:\n"
+        "      • Ticker MUST appear in the LIVE TICKER UNIVERSE block. If it's not\n"
+        "        there, you do NOT have a price for it — do not include it.\n"
+        "      • Entry MUST be within ±2% of that ticker's listed spot price. If you\n"
+        "        want a pullback entry farther away, this is a watchlist alert, NOT a\n"
+        "        trade plan — leave it out.\n"
+        "      • Target distance from entry MUST be at least 1.5× the stop distance.\n"
+        "        (Reward:risk ≥ 1.5:1. A 5% stop demands at least a 7.5% target.)\n"
+        "      • At most 2 trades may be HIGH conviction. The rest are MEDIUM-HIGH,\n"
+        "        MEDIUM, or LOW. Conviction inflation defeats the point of ranking.\n\n"
         "    Each trade is ALWAYS a shares plan (the primary entry). On top of that,\n"
         "    PREFER adding an 'options' companion whenever the setup fits: directional\n"
         "    move, clear catalyst window, reasonable IV (not crushed-high, not dead-low),\n"
@@ -373,9 +451,16 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
         "    near-the-money or one strike OTM in the trade's direction. Skip the\n"
         "    'options' companion only when the setup is slow/grindy, IV is brutal, or\n"
         "    Kevin explicitly steers away from contracts.\n\n"
-        "    Use the live prices in the LIVE CONTEXT above for the shares entry / stop /\n"
-        "    target. Shares stop: -5% to -10% from entry (tighter for leveraged ETFs\n"
-        "    like SOXL). Shares target: +10% to +25% based on conviction.\n"
+        "    OPTIONS COMPANION RULES:\n"
+        "      • SINGLE-LEG ONLY: one contract, one strike. Do NOT propose spreads\n"
+        "        (no bull_call_spread, bear_put_spread, iron_condor, etc.) — the\n"
+        "        schema below has exactly one 'strike' field and no others.\n"
+        "      • 'type' is 'call' for LONG, 'put' for SHORT. Never 'credit'/'debit'.\n"
+        "      • The options entry premium must be a positive number (a debit you pay).\n"
+        "      • Target premium ≤ ~2× entry premium for ATM 45 DTE — anything beyond\n"
+        "        that implies a move the shares plan itself isn't promising.\n\n"
+        "    Shares stop: -5% to -10% from entry (tighter for leveraged ETFs like\n"
+        "    SOXL/TQQQ). Shares target: +10% to +25%, but always ≥1.5× stop distance.\n"
         "    Options premium entry/stop/target: estimate from the share move using\n"
         "    rough delta (~0.50 for ATM 45 DTE). Round prices sensibly.\n\n"
         "    Format (strict — must be parseable JSON):\n"
@@ -429,7 +514,7 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None):
 
 # ── Trade Plan extraction & fallback ─────────────────────────────────────────
 
-def generate_trade_plan_focused(analysis_text, regime=None, risk=None):
+def generate_trade_plan_focused(analysis_text, regime=None, risk=None, live_prices=None):
     """Fallback: a focused Haiku call that returns JSON-only trade plans.
     Used when the main analysis ran out of tokens before reaching section 11."""
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -442,6 +527,9 @@ def generate_trade_plan_focused(analysis_text, regime=None, risk=None):
         live_lines.append("Current positions: " + ", ".join(
             f"{p['ticker']} entry ${p['entry']} → ${p['current']}" for p in risk["positions"]
         ))
+    if live_prices:
+        price_lines = ", ".join(f"{t} ${p:.2f}" for t, p in sorted(live_prices.items()))
+        live_lines.append(f"LIVE TICKER UNIVERSE (only tickers you may trade): {price_lines}")
     live_block = "\n".join(live_lines) if live_lines else ""
 
     # Truncate analysis to ~6000 chars to keep prompt small
@@ -455,14 +543,22 @@ def generate_trade_plan_focused(analysis_text, regime=None, risk=None):
         "ALWAYS a shares plan. PREFER adding an 'options' "
         "companion (45+ DTE, ATM/one-strike-OTM) whenever the setup is directional "
         "with a clear catalyst window and IV isn't crushed-high. Omit the 'options' "
-        "key (do NOT pass null) when contracts don't fit. Shares stop -5% to -10% "
-        "(-7% to -10% leveraged ETFs). Shares target +10% to +25%. Options premium "
-        "entry/stop/target: estimate from the share move via rough delta (~0.50 ATM "
-        "45 DTE). 'options.type' is 'call' for LONG, 'put' for SHORT. If no clean "
-        "setup exists, output {\"trades\": []}.\n\n"
+        "key (do NOT pass null) when contracts don't fit.\n\n"
+        "HARD RULES (any violating trade will be discarded):\n"
+        "  • Ticker MUST be in the LIVE TICKER UNIVERSE; use that exact spot price.\n"
+        "  • Entry within ±2% of spot. If you want a pullback entry farther away,\n"
+        "    skip the trade — it's a watchlist alert, not a plan.\n"
+        "  • Target distance from entry ≥ 1.5× the stop distance (R:R ≥ 1.5:1).\n"
+        "  • At most 2 trades may be HIGH conviction.\n"
+        "  • Options: SINGLE-LEG ONLY (one 'strike' field). No spreads.\n"
+        "  • Options 'type' is 'call' for LONG, 'put' for SHORT.\n\n"
+        "Shares stop -5% to -10% (-7% to -10% leveraged ETFs). Shares target +10% "
+        "to +25%. Options premium entry/stop/target: estimate from the share move "
+        "via rough delta (~0.50 ATM 45 DTE). If no clean setup exists, output "
+        "{\"trades\": []}.\n\n"
         f"{live_block}\n\n"
         f"ANALYSIS:\n{snippet}\n\n"
-        "Output JSON only, exact schema (options companion optional):\n"
+        "Output JSON only, exact schema (options companion optional, single-leg):\n"
         '{"trades":[{"ticker":"NVDA","direction":"LONG","instrument":"shares",'
         '"entry":145.00,"stop_loss":137.75,"target":165.00,"stop_pct":-5.0,'
         '"target_pct":13.8,"conviction":"HIGH","horizon":"2-7 days",'
@@ -521,6 +617,124 @@ def extract_trade_plan(text):
     clean = re.sub(r"\n*\s*1?1\.\s*TRADE[_ ]PLAN[_ ]JSON.*$", "", clean,
                    flags=re.IGNORECASE | re.DOTALL).rstrip()
     return clean, plan
+
+# ── Trade Plan Validation ────────────────────────────────────────────────────
+
+# Schema fields we expect on an options companion. Anything else (long_strike,
+# short_strike, strategy, entry_credit, etc.) signals the model went off-script
+# into spread territory — drop the whole options block in that case.
+_OPTIONS_ALLOWED_FIELDS = {"type", "strike", "expiration", "entry", "stop_loss",
+                          "target", "rationale"}
+
+def validate_trade_plan(plan, live_prices, *, entry_tolerance_pct=2.0,
+                        min_rr=1.5, max_high_conviction=2):
+    """Filter a parsed trade plan against live prices and structural rules.
+    Returns (filtered_plan, list_of_rejection_reasons). Mutates conviction in
+    place when downgrading; otherwise drops the trade entirely."""
+    if not plan or not isinstance(plan, dict):
+        return plan, ["plan is not a dict"]
+    trades = plan.get("trades") or []
+    kept, rejected = [], []
+    live = {k.upper(): v for k, v in (live_prices or {}).items()}
+
+    for t in trades:
+        ticker = str(t.get("ticker", "")).upper().strip()
+        if not ticker:
+            rejected.append("missing ticker"); continue
+
+        spot = live.get(ticker)
+        if not spot:
+            rejected.append(f"{ticker}: no live price — dropped"); continue
+
+        try:
+            entry  = float(t.get("entry"))
+            stop   = float(t.get("stop_loss"))
+            target = float(t.get("target"))
+        except (TypeError, ValueError):
+            rejected.append(f"{ticker}: non-numeric entry/stop/target"); continue
+
+        if entry <= 0 or stop <= 0 or target <= 0:
+            rejected.append(f"{ticker}: non-positive prices"); continue
+
+        # Entry must be within tolerance of spot
+        gap_pct = abs(entry - spot) / spot * 100
+        if gap_pct > entry_tolerance_pct:
+            rejected.append(
+                f"{ticker}: entry ${entry:.2f} is {gap_pct:.1f}% from spot "
+                f"${spot:.2f} (>{entry_tolerance_pct}%) — dropped"
+            ); continue
+
+        direction = str(t.get("direction", "LONG")).upper()
+        # Geometry sanity check by direction
+        if direction == "LONG":
+            if not (stop < entry < target):
+                rejected.append(f"{ticker} LONG: need stop<entry<target, got "
+                                f"{stop}/{entry}/{target}"); continue
+            risk   = entry - stop
+            reward = target - entry
+        else:
+            if not (target < entry < stop):
+                rejected.append(f"{ticker} SHORT: need target<entry<stop, got "
+                                f"{target}/{entry}/{stop}"); continue
+            risk   = stop - entry
+            reward = entry - target
+
+        if risk <= 0:
+            rejected.append(f"{ticker}: risk≤0"); continue
+        rr = reward / risk
+        if rr < min_rr:
+            rejected.append(f"{ticker}: R:R {rr:.2f} < {min_rr} — dropped"); continue
+
+        # Options companion validation — strip block if structurally wrong,
+        # but keep the shares trade.
+        opt = t.get("options")
+        if isinstance(opt, dict):
+            extras = set(opt.keys()) - _OPTIONS_ALLOWED_FIELDS
+            if extras:
+                rejected.append(f"{ticker}: stripped options block with "
+                                f"unexpected fields {sorted(extras)}")
+                t["options"] = None
+            else:
+                try:
+                    opt_entry  = float(opt.get("entry"))
+                    opt_stop   = float(opt.get("stop_loss"))
+                    opt_target = float(opt.get("target"))
+                    strike     = float(opt.get("strike"))
+                except (TypeError, ValueError):
+                    rejected.append(f"{ticker}: stripped options block — non-numeric")
+                    t["options"] = None
+                else:
+                    bad = (opt_entry <= 0 or opt_stop <= 0 or opt_target <= 0
+                           or strike <= 0
+                           or opt_target > opt_entry * 2.5  # impossible target
+                           or opt_stop >= opt_entry)        # stop must be below entry
+                    if bad:
+                        rejected.append(f"{ticker}: stripped options block — "
+                                        f"impossible math (entry {opt_entry}, "
+                                        f"stop {opt_stop}, target {opt_target}, "
+                                        f"strike {strike})")
+                        t["options"] = None
+
+        # Recompute the percentage fields against the validated entry/spot
+        try:
+            t["stop_pct"]   = round((stop - entry) / entry * 100, 1)
+            t["target_pct"] = round((target - entry) / entry * 100, 1)
+        except Exception:
+            pass
+        kept.append(t)
+
+    # Cap HIGH conviction count — downgrade extras to MEDIUM-HIGH (don't drop)
+    high_count = 0
+    for t in kept:
+        if str(t.get("conviction", "")).upper() == "HIGH":
+            high_count += 1
+            if high_count > max_high_conviction:
+                rejected.append(f"{t.get('ticker','?')}: HIGH downgraded to "
+                                f"MEDIUM-HIGH (cap is {max_high_conviction})")
+                t["conviction"] = "MEDIUM-HIGH"
+
+    plan["trades"] = kept
+    return plan, rejected
 
 # ── Notification ──────────────────────────────────────────────────────────────
 
@@ -612,17 +826,34 @@ def main():
         print(f"  Score: {sd['latest']}/10 (delta {sd['delta']:+.1f} vs prior {sd['n']}) "
               f"{sd['icon']} {sd['trend']}")
 
+    print("Fetching live ticker universe for trade-plan grounding...")
+    candidates  = _extract_candidate_tickers(reports)
+    live_prices = _fetch_snapshot_prices(candidates)
+    print(f"  {len(live_prices)}/{len(candidates)} tickers priced "
+          f"(sample: {', '.join(list(live_prices)[:8])})")
+
     print(f"Analyzing {len(reports)} reports with Claude...")
-    result = analyze_with_claude(reports, regime=regime, risk=risk, sentiment_delta=sd)
+    result = analyze_with_claude(reports, regime=regime, risk=risk,
+                                 sentiment_delta=sd, live_prices=live_prices)
 
     print("Extracting trade plan JSON...")
     narrative, trade_plan = extract_trade_plan(result)
     if not trade_plan or not trade_plan.get("trades"):
         print("  Main analysis missing trade plan — running focused fallback call...")
-        fallback = generate_trade_plan_focused(narrative or result, regime=regime, risk=risk)
+        fallback = generate_trade_plan_focused(narrative or result, regime=regime,
+                                               risk=risk, live_prices=live_prices)
         if fallback and fallback.get("trades") is not None:
             trade_plan = fallback
             print(f"  Fallback returned {len(trade_plan['trades'])} trades")
+
+    if trade_plan:
+        before = len(trade_plan.get("trades") or [])
+        trade_plan, rejections = validate_trade_plan(trade_plan, live_prices)
+        after = len(trade_plan.get("trades") or [])
+        print(f"  Validation: kept {after}/{before} trades")
+        for r in rejections:
+            print(f"    • {r}")
+
     if trade_plan and trade_plan.get("trades"):
         plan_path = os.path.join(RESULTS_DIR, f"{base}_trade_plan.json")
         with open(plan_path, "w") as f:

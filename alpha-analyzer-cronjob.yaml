@@ -14,13 +14,43 @@ spec:
             image: python:3.11-slim
             command: ["/bin/sh", "-c"]
             args:
-            - "pip install anthropic -q && python /scripts/analyzer.py"
+            - "pip install anthropic requests -q && python /scripts/analyzer.py"
             env:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: ANTHROPIC_API_KEY
+            - name: ALPACA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: ALPACA_API_KEY
+            - name: ALPACA_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: ALPACA_SECRET_KEY
+            - name: POLYGON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: POLYGON_API_KEY
+            - name: HA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_URL
+            - name: HA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_TOKEN
+            - name: HA_NOTIFY_SERVICE
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_NOTIFY_SERVICE
             volumeMounts:
             - name: reports
               mountPath: /reports
