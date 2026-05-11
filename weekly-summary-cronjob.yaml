@@ -1,0 +1,60 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weekly-summary
+  namespace: invest-ai
+spec:
+  # Friday 21:30 UTC ≈ 4:30pm EST / 5:30pm EDT — safely after market close.
+  schedule: "30 21 * * 5"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: weekly-summary
+            image: python:3.11-slim
+            command: ["/bin/sh", "-c"]
+            args:
+            - "pip install requests -q && python /scripts/weekly_summary.py"
+            env:
+            - name: ALPACA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: ALPACA_API_KEY
+            - name: ALPACA_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: ALPACA_SECRET_KEY
+            - name: HA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_URL
+            - name: HA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_TOKEN
+            - name: HA_NOTIFY_SERVICE
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_NOTIFY_SERVICE
+            volumeMounts:
+            - name: reports
+              mountPath: /reports
+            - name: scripts
+              mountPath: /scripts
+          volumes:
+          - name: reports
+            hostPath:
+              path: /mnt/alpha-reports
+              type: Directory
+          - name: scripts
+            configMap:
+              name: weekly-summary-script
+          restartPolicy: OnFailure

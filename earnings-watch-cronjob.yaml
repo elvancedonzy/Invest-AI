@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: earnings-watch
+  namespace: invest-ai
+spec:
+  # 12:30 UTC daily ≈ 7:30am EST / 8:30am EDT — before the trading day.
+  schedule: "30 12 * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: earnings-watch
+            image: python:3.11-slim
+            command: ["/bin/sh", "-c"]
+            args:
+            - "pip install requests -q && python /scripts/earnings_watch.py"
+            env:
+            - name: POLYGON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: POLYGON_API_KEY
+            - name: HA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_URL
+            - name: HA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_TOKEN
+            - name: HA_NOTIFY_SERVICE
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: HA_NOTIFY_SERVICE
+            volumeMounts:
+            - name: reports
+              mountPath: /reports
+            - name: scripts
+              mountPath: /scripts
+          volumes:
+          - name: reports
+            hostPath:
+              path: /mnt/alpha-reports
+              type: Directory
+          - name: scripts
+            configMap:
+              name: earnings-watch-script
+          restartPolicy: OnFailure
