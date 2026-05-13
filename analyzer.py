@@ -209,6 +209,193 @@ def _pick_expiration(expirations, target_dte=45):
             best, best_gap = e, gap
     return best
 
+# ── Trade Plan Grading (learning loop) ────────────────────────────────────────
+
+def _ensure_grades_table():
+    if not os.path.exists(DB_PATH):
+        return False
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS trade_plan_grades (
+                plan_file      TEXT    NOT NULL,
+                trade_idx      INTEGER NOT NULL,
+                ticker         TEXT    NOT NULL,
+                direction      TEXT,
+                entry          REAL,
+                stop_loss      REAL,
+                target         REAL,
+                generated_at   TEXT,
+                status         TEXT,
+                resolved_at    TEXT,
+                resolved_price REAL,
+                updated_at     TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (plan_file, trade_idx)
+            )
+        """)
+        con.commit()
+        con.close()
+        return True
+    except Exception as e:
+        print(f"  grades table init failed: {e}")
+        return False
+
+def _fetch_historical_bars(ticker, start_iso, days=45):
+    """Daily OHLC bars from start_iso forward, up to `days` ahead."""
+    key    = os.getenv("ALPACA_API_KEY")
+    secret = os.getenv("ALPACA_SECRET_KEY")
+    if not key:
+        return None
+    try:
+        r = requests.get(
+            f"https://data.alpaca.markets/v2/stocks/{ticker}/bars",
+            params={"timeframe": "1Day", "start": start_iso, "limit": days,
+                    "adjustment": "split", "sort": "asc"},
+            headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+            timeout=10,
+        )
+        bars = r.json().get("bars", [])
+        return [{"date": b["t"][:10], "high": b["h"], "low": b["l"], "close": b["c"]}
+                for b in bars]
+    except Exception as e:
+        print(f"  bars fetch failed for {ticker}: {e}")
+        return None
+
+def _evaluate_trade(trade, bars, *, expire_days=30):
+    """Walk daily bars; return (status, resolved_at, resolved_price).
+    If both stop and target hit same day, conservatively call it STOPPED."""
+    try:
+        entry  = float(trade.get("entry"))
+        stop   = float(trade.get("stop_loss"))
+        target = float(trade.get("target"))
+    except (TypeError, ValueError):
+        return "INVALID", None, None
+    direction = str(trade.get("direction", "LONG")).upper()
+    if not bars:
+        return "OPEN", None, None
+    for i, b in enumerate(bars):
+        if i >= expire_days:
+            break
+        if direction == "LONG":
+            hit_stop   = b["low"]  <= stop
+            hit_target = b["high"] >= target
+        else:
+            hit_stop   = b["high"] >= stop
+            hit_target = b["low"]  <= target
+        if hit_stop:
+            return "STOPPED", b["date"], stop
+        if hit_target:
+            return "HIT_TARGET", b["date"], target
+    if len(bars) >= expire_days:
+        return "EXPIRED", None, None
+    return "OPEN", None, None
+
+def grade_past_plans(max_plans=30):
+    """Grade every trade in the last `max_plans` saved plans. Skips trades
+    already resolved (HIT_TARGET, STOPPED, EXPIRED). Re-evaluates only
+    OPEN ones each run. Returns aggregate stats for prompt injection."""
+    if not _ensure_grades_table():
+        return None
+    plan_files = sorted(glob.glob(os.path.join(RESULTS_DIR, "*_trade_plan.json")))
+    plan_files = plan_files[-max_plans:]
+    if not plan_files:
+        return None
+
+    today_iso = datetime.utcnow().date().isoformat()
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    new_grades = updates_from_open = 0
+
+    for plan_file in plan_files:
+        try:
+            with open(plan_file) as f:
+                plan = json.load(f)
+        except Exception:
+            continue
+        plan_name = os.path.basename(plan_file)
+        gen_at = plan.get("generated_at", "")
+        gen_date = gen_at[:10] if gen_at else ""
+        if not gen_date or gen_date >= today_iso:
+            continue  # skip today/future
+        for idx, t in enumerate(plan.get("trades", [])):
+            existing = con.execute(
+                "SELECT status FROM trade_plan_grades WHERE plan_file=? AND trade_idx=?",
+                (plan_name, idx)
+            ).fetchone()
+            if existing and existing["status"] in ("HIT_TARGET", "STOPPED", "EXPIRED", "INVALID"):
+                continue
+            ticker = str(t.get("ticker", "")).upper()
+            if not ticker:
+                continue
+            try:
+                start_date = (datetime.fromisoformat(gen_date) + timedelta(days=1)).date().isoformat()
+            except Exception:
+                continue
+            bars = _fetch_historical_bars(ticker, start_date)
+            status, resolved_at, resolved_price = _evaluate_trade(t, bars)
+            if status == "INVALID":
+                continue
+            con.execute("""
+                INSERT INTO trade_plan_grades
+                    (plan_file, trade_idx, ticker, direction, entry, stop_loss, target,
+                     generated_at, status, resolved_at, resolved_price, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(plan_file, trade_idx) DO UPDATE SET
+                    status=excluded.status,
+                    resolved_at=excluded.resolved_at,
+                    resolved_price=excluded.resolved_price,
+                    updated_at=datetime('now')
+            """, (plan_name, idx, ticker, t.get("direction"), t.get("entry"),
+                  t.get("stop_loss"), t.get("target"), gen_at,
+                  status, resolved_at, resolved_price))
+            new_grades += 1
+            if existing:
+                updates_from_open += 1
+    con.commit()
+
+    rows = con.execute("SELECT status, COUNT(*) AS n FROM trade_plan_grades GROUP BY status").fetchall()
+    stats = {r["status"]: r["n"] for r in rows}
+    recent_hits = [dict(r) for r in con.execute(
+        "SELECT ticker, generated_at, entry, target FROM trade_plan_grades "
+        "WHERE status='HIT_TARGET' ORDER BY resolved_at DESC LIMIT 3"
+    ).fetchall()]
+    recent_stops = [dict(r) for r in con.execute(
+        "SELECT ticker, generated_at, entry, stop_loss FROM trade_plan_grades "
+        "WHERE status='STOPPED' ORDER BY resolved_at DESC LIMIT 3"
+    ).fetchall()]
+    con.close()
+    total = sum(stats.values())
+    print(f"  Graded {new_grades} trades ({updates_from_open} resolved from OPEN); "
+          f"totals: {stats}")
+    return {"total": total, "by_status": stats,
+            "recent_hits": recent_hits, "recent_stops": recent_stops}
+
+def build_accuracy_context(stats):
+    """Compact 5-line accuracy block injected into the analyzer prompt."""
+    if not stats or not stats.get("total"):
+        return ""
+    by = stats["by_status"]
+    hit, stop = by.get("HIT_TARGET", 0), by.get("STOPPED", 0)
+    open_, expired = by.get("OPEN", 0), by.get("EXPIRED", 0)
+    resolved = hit + stop
+    hit_rate = (hit / resolved * 100) if resolved else 0
+    lines = [
+        f"ANALYZER TRACK RECORD ({stats['total']} prior plan trades graded):",
+        f"  HIT TARGET: {hit}  STOPPED: {stop}  EXPIRED no-resolution: {expired}  still OPEN: {open_}",
+        f"  Hit rate on resolved trades: {hit_rate:.0f}%",
+    ]
+    if stats["recent_hits"]:
+        wins = ", ".join(f"{h['ticker']} {h['generated_at'][:10]}" for h in stats["recent_hits"])
+        lines.append(f"  Recent winners: {wins}")
+    if stats["recent_stops"]:
+        losses = ", ".join(f"{s['ticker']} {s['generated_at'][:10]}" for s in stats["recent_stops"])
+        lines.append(f"  Recent losers: {losses}")
+    lines.append(
+        "  CALIBRATE: if stop-rate is high, recent picks were too aggressive — tighten "
+        "conviction or widen R:R; if expired-rate is high, horizons were too long."
+    )
+    return "\n".join(lines)
+
 def _get_options_budget():
     """Read budget from the shared settings table (set via dashboard UI).
     Fall back to OPTIONS_BUDGET env var, then $500. Errors are swallowed —
@@ -550,7 +737,7 @@ def check_upcoming_earnings():
 
 # ── Claude Analysis ───────────────────────────────────────────────────────────
 
-def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None, live_prices=None):
+def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None, live_prices=None, accuracy=None):
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     history_summary          = build_history_context(reports)
@@ -566,6 +753,9 @@ def analyze_with_claude(reports, regime=None, risk=None, sentiment_delta=None, l
             "Use these exact spot prices to anchor entry/stop/target. Do NOT invent prices.\n"
             f"{price_lines}"
         )
+
+    if accuracy:
+        live_parts.append(accuracy)
 
     if regime:
         live_parts.append(
@@ -972,9 +1162,16 @@ def main():
     print(f"  {len(live_prices)}/{len(candidates)} tickers priced "
           f"(sample: {', '.join(list(live_prices)[:8])})")
 
+    print("Grading past trade plans for feedback loop...")
+    accuracy_stats = grade_past_plans()
+    accuracy_block = build_accuracy_context(accuracy_stats) if accuracy_stats else None
+    if accuracy_block:
+        print("  " + accuracy_block.replace("\n", "\n  "))
+
     print(f"Analyzing {len(reports)} reports with Claude...")
     result = analyze_with_claude(reports, regime=regime, risk=risk,
-                                 sentiment_delta=sd, live_prices=live_prices)
+                                 sentiment_delta=sd, live_prices=live_prices,
+                                 accuracy=accuracy_block)
 
     print("Extracting trade plan JSON...")
     narrative, trade_plan = extract_trade_plan(result)
