@@ -1551,6 +1551,20 @@ async def home(request: Request):
         }}
         /* Monospace data treatment via utility */
         .num,.price,code,pre{{font-family:var(--mono);font-feature-settings:"tnum","zero"}}
+        /* Tabular-numbers utility — keeps inline-styled dollar amounts in line */
+        .tnum{{font-variant-numeric:tabular-nums;font-family:var(--mono)}}
+        /* Keyboard focus — visible ring on every interactive element.
+           Mouse users never see this (focus-visible only triggers from kb). */
+        :focus-visible{{
+          outline:2px solid var(--teal);
+          outline-offset:2px;
+          border-radius:6px;
+        }}
+        button:focus-visible,a:focus-visible{{
+          outline:2px solid var(--teal);outline-offset:2px;
+        }}
+        /* Suppress the legacy focus ring on inputs — they keep their custom one */
+        input:focus-visible,select:focus-visible{{outline:none}}
         /* ── Cards (refined surface + accent rule + staggered reveal) ── */
         .card{{
           position:relative;background:var(--surface-1);padding:20px;
@@ -1653,6 +1667,17 @@ async def home(request: Request):
         .btn-sm:hover,.btn-sm:active{{border-color:#00d4ff;color:#00d4ff;background:#0d1a26}}
         /* ── Section sub-divider ─────────────────────────────────── */
         .sub-divider{{border-top:1px solid #21262d;margin:12px 0;padding-top:12px}}
+        /* ── Tab buttons (Watchlist Open/Watching, etc.) ─────────── */
+        .tab-btn{{
+          width:auto!important;margin:0;padding:8px 14px;font-size:13px;
+          background:transparent;border:none;border-bottom:2px solid transparent;
+          border-radius:0;cursor:pointer;font-weight:500;letter-spacing:0;
+          text-transform:none;font-family:var(--sans);color:#8b949e;
+          box-shadow:none;transition:color .15s,border-color .15s
+        }}
+        .tab-btn:hover{{color:var(--text);box-shadow:none;filter:none}}
+        .tab-btn.active{{color:var(--teal);border-bottom-color:var(--teal)}}
+        .tab-btn .count{{color:#8b949e;font-size:12px;margin-left:4px}}
         /* ── Track-record filter tabs ────────────────────────────── */
         .tr-tab{{width:auto!important;margin:0;padding:4px 11px;font-size:11px;
                  background:#0d1117;color:#8b949e;border:1px solid #30363d;
@@ -1770,7 +1795,7 @@ async def home(request: Request):
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span class="meta" style="font-size:12px">
               Options budget:
-              <b id="options-budget-display" style="color:#e6edf3">…</b>
+              <b id="options-budget-display" class="tnum" style="color:#e6edf3">…</b>
               <button onclick="editOptionsBudget()" title="Edit options budget cap"
                 style="margin:0 0 0 4px;padding:3px 8px;font-size:11px;width:auto;background:#161b22;color:#8b949e;border:1px solid #30363d;border-radius:4px">✎ edit</button>
             </span>
@@ -1863,14 +1888,12 @@ async def home(request: Request):
 
       <div class="card">
         <h3>💼 Watchlist &amp; P&amp;L <button class="help-btn" onclick="showHelp('watchlist')">?</button></h3>
-        <div style="display:flex;gap:4px;margin-bottom:10px;border-bottom:1px solid #30363d">
-          <button id="wl-tab-open" onclick="setWatchTab('open')"
-            style="margin:0;padding:8px 14px;font-size:13px;background:transparent;color:#00ff88;border:none;border-bottom:2px solid #00ff88;border-radius:0;cursor:pointer">
-            📊 Open Trades <span id="wl-count-open" style="color:#8b949e">(0)</span>
+        <div style="display:flex;gap:4px;margin-bottom:10px;border-bottom:1px solid var(--border)">
+          <button id="wl-tab-open" class="tab-btn active" onclick="setWatchTab('open')">
+            📊 Open Trades <span class="count tnum" id="wl-count-open">(0)</span>
           </button>
-          <button id="wl-tab-watching" onclick="setWatchTab('watching')"
-            style="margin:0;padding:8px 14px;font-size:13px;background:transparent;color:#8b949e;border:none;border-bottom:2px solid transparent;border-radius:0;cursor:pointer">
-            👁 Watching <span id="wl-count-watching" style="color:#8b949e">(0)</span>
+          <button id="wl-tab-watching" class="tab-btn" onclick="setWatchTab('watching')">
+            👁 Watching <span class="count tnum" id="wl-count-watching">(0)</span>
           </button>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
@@ -2052,13 +2075,9 @@ async def home(request: Request):
 
         function setWatchTab(tab) {{
           currentWatchTab = tab;
-          const tabs = [['open','#00ff88'], ['watching','#00d4ff']];
-          tabs.forEach(function(t) {{
-            const btn = document.getElementById('wl-tab-' + t[0]);
-            if (!btn) return;
-            const active = (t[0] === tab);
-            btn.style.color = active ? t[1] : '#8b949e';
-            btn.style.borderBottomColor = active ? t[1] : 'transparent';
+          ['open','watching'].forEach(function(t) {{
+            const btn = document.getElementById('wl-tab-' + t);
+            if (btn) btn.classList.toggle('active', t === tab);
           }});
           // Default the add-form status to the visible tab — less clicking.
           const statusSel = document.getElementById('wl-status');
@@ -2083,8 +2102,8 @@ async def home(request: Request):
           }});
           const cOpen = document.getElementById('wl-count-open');
           const cWatch = document.getElementById('wl-count-watching');
-          if (cOpen)  cOpen.innerText  = '(' + counts.open     + ')';
-          if (cWatch) cWatch.innerText = '(' + counts.watching + ')';
+          if (cOpen)  cOpen.textContent  = '(' + counts.open     + ')';
+          if (cWatch) cWatch.textContent = '(' + counts.watching + ')';
 
           const filtered = positions.filter(function(p) {{
             return (p.status || 'open') === currentWatchTab;
@@ -2135,7 +2154,7 @@ async def home(request: Request):
               html += '<tr>'
                 + '<td style="padding:5px 8px;font-weight:bold;color:#00d4ff">' + pos.ticker + '</td>'
                 + '<td style="padding:5px 8px;text-align:right;color:#8b949e;font-size:12px">' + note + '</td>'
-                + '<td style="padding:5px 8px;text-align:right;color:#e6edf3">' + (now ? '$' + now : '<span class="meta">—</span>') + '</td>'
+                + '<td class="tnum" style="padding:5px 8px;text-align:right;color:#e6edf3">' + (now ? '$' + now : '<span class="meta">—</span>') + '</td>'
                 + '<td style="padding:5px 8px;text-align:right">' + pctHtml + '</td>'
                 + '<td style="padding:5px 8px;text-align:right;white-space:nowrap">'
                 + '<button onclick="flipWatchStatus(' + pos.id + ', \\'open\\')" title="Move to Open Trades" style="margin:0;padding:3px 8px;font-size:11px;width:auto;background:#0d1f17;color:#00ff88;border:1px solid #00ff8855;border-radius:4px">→ Open</button>'
@@ -2184,10 +2203,10 @@ async def home(request: Request):
             html += '<tr>'
               + '<td style="padding:5px 8px;font-weight:bold;color:#00d4ff">' + pos.ticker + '</td>'
               + '<td style="padding:5px 8px;text-align:right;color:#c9d1d9">' + sLabel + '</td>'
-              + '<td style="padding:5px 8px;text-align:right;color:#c9d1d9">$' + entry.toFixed(2) + '</td>'
-              + '<td style="padding:5px 8px;text-align:right;color:#e6edf3">' + (now ? '$' + now : '<span class="meta">—</span>') + '</td>'
-              + '<td style="padding:5px 8px;text-align:right">' + pnlHtml + '</td>'
-              + '<td style="padding:5px 8px;text-align:right">' + pctHtml + '</td>'
+              + '<td class="tnum" style="padding:5px 8px;text-align:right;color:#c9d1d9">$' + entry.toFixed(2) + '</td>'
+              + '<td class="tnum" style="padding:5px 8px;text-align:right;color:#e6edf3">' + (now ? '$' + now : '<span class="meta">—</span>') + '</td>'
+              + '<td class="tnum" style="padding:5px 8px;text-align:right">' + pnlHtml + '</td>'
+              + '<td class="tnum" style="padding:5px 8px;text-align:right">' + pctHtml + '</td>'
               + '<td style="padding:5px 8px;text-align:right;white-space:nowrap">'
               + '<button onclick="flipWatchStatus(' + pos.id + ', \\'watching\\')" title="Move to Watching (closed the trade?)" style="margin:0;padding:3px 8px;font-size:11px;width:auto;background:#0d1622;color:#00d4ff;border:1px solid #00d4ff55;border-radius:4px">→ Watch</button>'
               + ' <span style="cursor:pointer;color:#8b949e;font-size:18px;line-height:1;margin-left:6px" onclick="removePosition(' + pos.id + ')">×</span>'
