@@ -68,6 +68,13 @@ def init_db():
             con.execute("ALTER TABLE profiles ADD COLUMN avatar TEXT DEFAULT '📈'")
         except Exception:
             pass
+        # add status to watchlist (open vs watching) — existing rows default to 'open'
+        # so users who've been using watchlist as their open-trades log don't lose data
+        try:
+            con.execute("ALTER TABLE watchlist ADD COLUMN status TEXT DEFAULT 'open'")
+            con.execute("UPDATE watchlist SET status='open' WHERE status IS NULL")
+        except Exception:
+            pass
         # seed a default profile if none exist
         row = con.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
         if row == 0:
@@ -118,20 +125,40 @@ def set_setting(key, value):
 
 # ── Watchlist helpers ─────────────────────────────────────────────────────────
 
-def db_get_watchlist(profile_id):
+def db_get_watchlist(profile_id, status=None):
     with get_db() as con:
-        return [dict(r) for r in con.execute(
-            "SELECT * FROM watchlist WHERE profile_id=? ORDER BY added_at DESC", (profile_id,)
-        ).fetchall()]
+        if status:
+            rows = con.execute(
+                "SELECT * FROM watchlist WHERE profile_id=? AND COALESCE(status,'open')=? "
+                "ORDER BY added_at DESC", (profile_id, status)
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT * FROM watchlist WHERE profile_id=? ORDER BY added_at DESC",
+                (profile_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
-def db_add_watch(profile_id, ticker, size, entry, wtype):
+def db_add_watch(profile_id, ticker, size, entry, wtype, status="open"):
+    if status not in ("open", "watching"):
+        status = "open"
     with get_db() as con:
-        con.execute("INSERT INTO watchlist(profile_id,ticker,size,entry,type) VALUES(?,?,?,?,?)",
-                    (profile_id, ticker.upper(), size, entry, wtype))
+        con.execute(
+            "INSERT INTO watchlist(profile_id,ticker,size,entry,type,status) "
+            "VALUES(?,?,?,?,?,?)",
+            (profile_id, ticker.upper(), size, entry, wtype, status)
+        )
 
 def db_remove_watch(wid, profile_id):
     with get_db() as con:
         con.execute("DELETE FROM watchlist WHERE id=? AND profile_id=?", (wid, profile_id))
+
+def db_set_watch_status(wid, profile_id, status):
+    if status not in ("open", "watching"):
+        return
+    with get_db() as con:
+        con.execute("UPDATE watchlist SET status=? WHERE id=? AND profile_id=?",
+                    (status, wid, profile_id))
 
 # ── History helpers ───────────────────────────────────────────────────────────
 
@@ -796,13 +823,14 @@ class WatchItem(BaseModel):
     size: float
     entry: float
     type: str = "stock"
+    status: str = "open"  # "open" (a real position) or "watching" (idea only)
 
 @app.post("/watchlist-server")
 async def wl_add(item: WatchItem, request: Request):
     pid = current_profile_id(request)
     if not pid:
         raise HTTPException(403, "No profile selected")
-    db_add_watch(pid, item.ticker, item.size, item.entry, item.type)
+    db_add_watch(pid, item.ticker, item.size, item.entry, item.type, item.status)
     return {"ok": True}
 
 @app.delete("/watchlist-server/{wid}")
@@ -812,6 +840,19 @@ async def wl_remove(wid: int, request: Request):
         raise HTTPException(403, "No profile selected")
     db_remove_watch(wid, pid)
     return {"ok": True}
+
+class WatchStatusUpdate(BaseModel):
+    status: str
+
+@app.patch("/watchlist-server/{wid}/status")
+async def wl_set_status(wid: int, body: WatchStatusUpdate, request: Request):
+    pid = current_profile_id(request)
+    if not pid:
+        raise HTTPException(403, "No profile selected")
+    if body.status not in ("open", "watching"):
+        return {"error": "status must be 'open' or 'watching'"}
+    db_set_watch_status(wid, pid, body.status)
+    return {"ok": True, "status": body.status}
 
 # ── Per-user history ──────────────────────────────────────────────────────────
 
@@ -1822,6 +1863,16 @@ async def home(request: Request):
 
       <div class="card">
         <h3>💼 Watchlist &amp; P&amp;L <button class="help-btn" onclick="showHelp('watchlist')">?</button></h3>
+        <div style="display:flex;gap:4px;margin-bottom:10px;border-bottom:1px solid #30363d">
+          <button id="wl-tab-open" onclick="setWatchTab('open')"
+            style="margin:0;padding:8px 14px;font-size:13px;background:transparent;color:#00ff88;border:none;border-bottom:2px solid #00ff88;border-radius:0;cursor:pointer">
+            📊 Open Trades <span id="wl-count-open" style="color:#8b949e">(0)</span>
+          </button>
+          <button id="wl-tab-watching" onclick="setWatchTab('watching')"
+            style="margin:0;padding:8px 14px;font-size:13px;background:transparent;color:#8b949e;border:none;border-bottom:2px solid transparent;border-radius:0;cursor:pointer">
+            👁 Watching <span id="wl-count-watching" style="color:#8b949e">(0)</span>
+          </button>
+        </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
           <input type="text"   id="wl-ticker" placeholder="Ticker"  style="margin:0;width:75px;padding:8px;font-size:13px"/>
           <input type="number" id="wl-size"   placeholder="Qty"     style="margin:0;width:65px;padding:8px;font-size:13px" min="0" step="1"/>
@@ -1829,6 +1880,10 @@ async def home(request: Request):
           <select id="wl-type" style="padding:9px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;font-size:13px">
             <option value="stock">Shares</option>
             <option value="option">Contracts ×100</option>
+          </select>
+          <select id="wl-status" title="Open = real position. Watching = idea only." style="padding:9px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;font-size:13px">
+            <option value="open">📊 Open</option>
+            <option value="watching">👁 Watching</option>
           </select>
           <button onclick="addPosition()" style="margin:0;padding:9px 14px;font-size:13px">+ Add</button>
           <button onclick="loadWatchlist()" title="Refresh prices" style="margin:0;padding:9px;width:38px;font-size:15px;background:#161b22;color:#8b949e;border:1px solid #30363d">↻</button>
@@ -1992,6 +2047,25 @@ async def home(request: Request):
           if (r) document.getElementById('ps-risk').value = r;
         }})();
 
+        // Active watchlist tab — 'open' (real positions) or 'watching' (ideas).
+        let currentWatchTab = 'open';
+
+        function setWatchTab(tab) {{
+          currentWatchTab = tab;
+          const tabs = [['open','#00ff88'], ['watching','#00d4ff']];
+          tabs.forEach(function(t) {{
+            const btn = document.getElementById('wl-tab-' + t[0]);
+            if (!btn) return;
+            const active = (t[0] === tab);
+            btn.style.color = active ? t[1] : '#8b949e';
+            btn.style.borderBottomColor = active ? t[1] : 'transparent';
+          }});
+          // Default the add-form status to the visible tab — less clicking.
+          const statusSel = document.getElementById('wl-status');
+          if (statusSel) statusSel.value = tab;
+          loadWatchlist();
+        }}
+
         async function loadWatchlist() {{
           const el    = document.getElementById('wl-table');
           const totEl = document.getElementById('wl-total');
@@ -2000,13 +2074,32 @@ async def home(request: Request):
             const r = await fetch('/watchlist-server');
             positions = await r.json();
           }} catch(e) {{ el.innerHTML = '<span class="meta">Error loading watchlist.</span>'; return; }}
-          if (!positions.length) {{
-            el.innerHTML = '<span class="meta">No positions yet. Enter ticker, qty, entry price above and click + Add.</span>';
+
+          // Counts go on the tab labels regardless of which tab is active.
+          const counts = {{open: 0, watching: 0}};
+          positions.forEach(function(p) {{
+            const s = (p.status || 'open');
+            counts[s] = (counts[s] || 0) + 1;
+          }});
+          const cOpen = document.getElementById('wl-count-open');
+          const cWatch = document.getElementById('wl-count-watching');
+          if (cOpen)  cOpen.innerText  = '(' + counts.open     + ')';
+          if (cWatch) cWatch.innerText = '(' + counts.watching + ')';
+
+          const filtered = positions.filter(function(p) {{
+            return (p.status || 'open') === currentWatchTab;
+          }});
+
+          if (!filtered.length) {{
+            const msg = currentWatchTab === 'open'
+              ? 'No open trades yet. Add your Robinhood positions above with ticker, qty, entry price.'
+              : 'Nothing on your watchlist. Add ideas above with the status set to Watching.';
+            el.innerHTML = '<span class="meta">' + msg + '</span>';
             totEl.innerHTML = '';
             return;
           }}
           const uniq = [];
-          positions.forEach(function(p) {{ if (!uniq.includes(p.ticker)) uniq.push(p.ticker); }});
+          filtered.forEach(function(p) {{ if (!uniq.includes(p.ticker)) uniq.push(p.ticker); }});
           let px = {{}};
           try {{
             const r = await fetch('/prices?tickers=' + uniq.join(','));
@@ -2014,6 +2107,49 @@ async def home(request: Request):
           }} catch(e) {{}}
 
           const th = 'padding:5px 8px;color:#8b949e;border-bottom:1px solid #30363d';
+
+          // Watching view — lighter, just ticker + current price + actions.
+          if (currentWatchTab === 'watching') {{
+            let html = '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+              + '<tr>'
+              + '<th style="' + th + ';text-align:left">Ticker</th>'
+              + '<th style="' + th + ';text-align:right">Notes</th>'
+              + '<th style="' + th + ';text-align:right">Now</th>'
+              + '<th style="' + th + ';text-align:right">vs Entry</th>'
+              + '<th style="' + th + '"></th>'
+              + '</tr>';
+            filtered.forEach(function(pos) {{
+              const data  = px[pos.ticker];
+              const now   = data && data.price ? data.price : null;
+              const entry = parseFloat(pos.entry);
+              let pctHtml = '<span class="meta">—</span>';
+              if (now && entry) {{
+                const pct = (now - entry) / entry * 100;
+                const col = pct >= 0 ? '#00ff88' : '#ff6b6b';
+                const arr = pct >= 0 ? '▲' : '▼';
+                pctHtml = '<span style="color:' + col + '">' + arr + Math.abs(pct).toFixed(1) + '%</span>';
+              }}
+              const note = pos.type === 'option'
+                ? (pos.size + ' cts · $' + entry.toFixed(2))
+                : (pos.size + ' sh · $' + entry.toFixed(2));
+              html += '<tr>'
+                + '<td style="padding:5px 8px;font-weight:bold;color:#00d4ff">' + pos.ticker + '</td>'
+                + '<td style="padding:5px 8px;text-align:right;color:#8b949e;font-size:12px">' + note + '</td>'
+                + '<td style="padding:5px 8px;text-align:right;color:#e6edf3">' + (now ? '$' + now : '<span class="meta">—</span>') + '</td>'
+                + '<td style="padding:5px 8px;text-align:right">' + pctHtml + '</td>'
+                + '<td style="padding:5px 8px;text-align:right;white-space:nowrap">'
+                + '<button onclick="flipWatchStatus(' + pos.id + ', \\'open\\')" title="Move to Open Trades" style="margin:0;padding:3px 8px;font-size:11px;width:auto;background:#0d1f17;color:#00ff88;border:1px solid #00ff8855;border-radius:4px">→ Open</button>'
+                + ' <span style="cursor:pointer;color:#8b949e;font-size:18px;line-height:1;margin-left:6px" onclick="removePosition(' + pos.id + ')">×</span>'
+                + '</td>'
+                + '</tr>';
+            }});
+            html += '</table>';
+            el.innerHTML = html;
+            totEl.innerHTML = '<span class="meta">' + filtered.length + ' ticker' + (filtered.length === 1 ? '' : 's') + ' on watch.</span>';
+            return;
+          }}
+
+          // Open Trades view — full P&L row with flip + delete.
           let html = '<table style="width:100%;border-collapse:collapse;font-size:13px">'
             + '<tr>'
             + '<th style="' + th + ';text-align:left">Ticker</th>'
@@ -2027,7 +2163,7 @@ async def home(request: Request):
 
           let totalPnl = 0;
           let allPriced = true;
-          positions.forEach(function(pos) {{
+          filtered.forEach(function(pos) {{
             const data   = px[pos.ticker];
             const now    = data && data.price ? data.price : null;
             const entry  = parseFloat(pos.entry);
@@ -2052,17 +2188,18 @@ async def home(request: Request):
               + '<td style="padding:5px 8px;text-align:right;color:#e6edf3">' + (now ? '$' + now : '<span class="meta">—</span>') + '</td>'
               + '<td style="padding:5px 8px;text-align:right">' + pnlHtml + '</td>'
               + '<td style="padding:5px 8px;text-align:right">' + pctHtml + '</td>'
-              + '<td style="padding:5px 8px;text-align:right">'
-              + '<span style="cursor:pointer;color:#8b949e;font-size:18px;line-height:1" onclick="removePosition(' + pos.id + ')">×</span>'
+              + '<td style="padding:5px 8px;text-align:right;white-space:nowrap">'
+              + '<button onclick="flipWatchStatus(' + pos.id + ', \\'watching\\')" title="Move to Watching (closed the trade?)" style="margin:0;padding:3px 8px;font-size:11px;width:auto;background:#0d1622;color:#00d4ff;border:1px solid #00d4ff55;border-radius:4px">→ Watch</button>'
+              + ' <span style="cursor:pointer;color:#8b949e;font-size:18px;line-height:1;margin-left:6px" onclick="removePosition(' + pos.id + ')">×</span>'
               + '</td>'
               + '</tr>';
           }});
           html += '</table>';
           el.innerHTML = html;
-          if (positions.length) {{
+          if (filtered.length) {{
             const col  = totalPnl >= 0 ? '#00ff88' : '#ff6b6b';
             const sign = totalPnl >= 0 ? '+' : '-';
-            totEl.innerHTML = 'Total P&amp;L: <b style="color:' + col + '">' + sign + '$' + Math.abs(totalPnl).toFixed(0) + '</b>'
+            totEl.innerHTML = 'Total Open P&amp;L: <b style="color:' + col + '">' + sign + '$' + Math.abs(totalPnl).toFixed(0) + '</b>'
               + (allPriced ? '' : ' <span class="meta">(some prices unavailable)</span>');
           }}
         }}
@@ -2072,19 +2209,31 @@ async def home(request: Request):
           const size   = parseFloat(document.getElementById('wl-size').value);
           const entry  = parseFloat(document.getElementById('wl-entry').value);
           const type   = document.getElementById('wl-type').value;
+          const status = document.getElementById('wl-status').value;
           if (!ticker || !size || !entry) {{ alert('Ticker, quantity, and entry price are all required.'); return; }}
           await fetch('/watchlist-server', {{
             method: 'POST', headers: {{'Content-Type':'application/json'}},
-            body: JSON.stringify({{ticker, size, entry, type}})
+            body: JSON.stringify({{ticker, size, entry, type, status}})
           }});
           document.getElementById('wl-ticker').value = '';
           document.getElementById('wl-size').value   = '';
           document.getElementById('wl-entry').value  = '';
-          loadWatchlist();
+          // Jump to whichever tab the new entry went into so the user sees it land.
+          if (status !== currentWatchTab) setWatchTab(status);
+          else loadWatchlist();
         }}
 
         async function removePosition(id) {{
           await fetch('/watchlist-server/' + id, {{method: 'DELETE'}});
+          loadWatchlist();
+        }}
+
+        async function flipWatchStatus(id, newStatus) {{
+          await fetch('/watchlist-server/' + id + '/status', {{
+            method: 'PATCH',
+            headers: {{'Content-Type':'application/json'}},
+            body: JSON.stringify({{status: newStatus}})
+          }});
           loadWatchlist();
         }}
 
