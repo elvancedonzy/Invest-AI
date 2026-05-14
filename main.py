@@ -502,9 +502,8 @@ def build_trade_plan_html(plan):
                 '<div style="display:flex;align-items:center;gap:4px">'
                 f'<span style="font-size:18px;font-weight:bold;color:{color}">${value}</span>'
                 f'{badge_html}'
-                f'<button onclick="copyTP(\'{value}\',this)" title="Copy" '
-                'style="margin:0;padding:3px 6px;font-size:10px;background:#30363d;'
-                'color:#8b949e;width:auto;border:1px solid #30363d;border-radius:4px">📋</button>'
+                f'<button onclick="copyTP(\'{value}\',this)" class="icon-mini-btn" '
+                f'title="Copy ${value}" aria-label="Copy ${value}">📋</button>'
                 '</div></div>'
             )
 
@@ -1565,6 +1564,45 @@ async def home(request: Request):
         }}
         /* Suppress the legacy focus ring on inputs — they keep their custom one */
         input:focus-visible,select:focus-visible{{outline:none}}
+        /* ── Touch-target hit-area expansion ──────────────────────────
+           For icon-only buttons (help ?, copy 📋, close ×, refresh ↻, etc.)
+           the visual stays small but the tap zone expands to ≥44×44 via an
+           invisible ::after. Mouse users don't notice; mobile users stop
+           missing taps. */
+        .help-btn,.modal-close,.icon-x,.icon-mini-btn{{position:relative}}
+        .help-btn::after,.modal-close::after,.icon-x::after,.icon-mini-btn::after{{
+          content:"";position:absolute;
+          top:50%;left:50%;width:44px;height:44px;
+          transform:translate(-50%,-50%);
+          /* Ensure the pseudo doesn't paint anything; pointer events on the
+             button still hit because the pseudo is a child. */
+          pointer-events:auto;
+        }}
+        /* Small × delete button (replaces clickable <span>×</span> patterns) */
+        .icon-x{{
+          width:auto!important;margin:0;padding:4px 8px;font-size:18px;
+          line-height:1;background:transparent;color:#8b949e;border:none;
+          font-weight:normal;letter-spacing:0;cursor:pointer;
+          text-transform:none;font-family:var(--sans);
+          box-shadow:none;transition:color .15s,transform .12s
+        }}
+        .icon-x:hover{{color:var(--bear);box-shadow:none;filter:none}}
+        .icon-x:active{{transform:scale(.92)}}
+        /* Small mini buttons (the 📋 copy, ✎ edit, etc.) */
+        .icon-mini-btn{{
+          width:auto!important;margin:0;padding:4px 8px;font-size:11px;
+          line-height:1.2;background:#161b22;color:#8b949e;
+          border:1px solid var(--border);border-radius:4px;
+          font-weight:normal;letter-spacing:0;cursor:pointer;
+          text-transform:none;font-family:var(--sans);
+          box-shadow:none;transition:.15s
+        }}
+        .icon-mini-btn:hover{{border-color:var(--teal);color:var(--teal);box-shadow:none;filter:none}}
+        .icon-mini-btn:active{{transform:scale(.95)}}
+        /* Universal pressed-state feedback — every tap confirms visually */
+        .tab-btn:active,.btn-sm:active,.chip:active,.tr-tab:active,.help-btn:active{{
+          transform:scale(.96);
+        }}
         /* ── Cards (refined surface + accent rule + staggered reveal) ── */
         .card{{
           position:relative;background:var(--surface-1);padding:20px;
@@ -1763,7 +1801,7 @@ async def home(request: Request):
       <div id="historyPanel" style="display:none;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:15px;margin-bottom:15px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <h3 style="color:#00d4ff;font-size:14px">📋 Your Recent Activity</h3>
-          <button onclick="toggleHistory()" style="background:none;border:none;color:#8b949e;font-size:18px;cursor:pointer">×</button>
+          <button onclick="toggleHistory()" class="icon-x" aria-label="Close history panel">×</button>
         </div>
         <div id="historyContent" style="font-size:12px;color:#8b949e;max-height:420px;overflow-y:auto"></div>
       </div>
@@ -1796,8 +1834,9 @@ async def home(request: Request):
             <span class="meta" style="font-size:12px">
               Options budget:
               <b id="options-budget-display" class="tnum" style="color:#e6edf3">…</b>
-              <button onclick="editOptionsBudget()" title="Edit options budget cap"
-                style="margin:0 0 0 4px;padding:3px 8px;font-size:11px;width:auto;background:#161b22;color:#8b949e;border:1px solid #30363d;border-radius:4px">✎ edit</button>
+              <button onclick="editOptionsBudget()" class="icon-mini-btn"
+                title="Edit options budget cap" aria-label="Edit options budget"
+                style="margin-left:4px">✎ edit</button>
             </span>
             <button onclick="loadTradePlan()" class="btn-sm" title="Refresh trade plan" style="width:auto;margin:0;padding:5px 12px;font-size:12px;background:#161b22;color:#8b949e;border:1px solid #30363d">↻ Refresh</button>
           </div>
@@ -1909,7 +1948,7 @@ async def home(request: Request):
             <option value="watching">👁 Watching</option>
           </select>
           <button onclick="addPosition()" style="margin:0;padding:9px 14px;font-size:13px">+ Add</button>
-          <button onclick="loadWatchlist()" title="Refresh prices" style="margin:0;padding:9px;width:38px;font-size:15px;background:#161b22;color:#8b949e;border:1px solid #30363d">↻</button>
+          <button onclick="loadWatchlist()" class="icon-mini-btn" title="Refresh prices" aria-label="Refresh prices" style="font-size:15px;padding:9px 11px">↻</button>
         </div>
         <div id="wl-table" class="scroll-x"></div>
         <div id="wl-total" style="margin-top:10px;font-size:14px;padding-top:8px;border-top:1px solid #30363d"></div>
@@ -2158,7 +2197,7 @@ async def home(request: Request):
                 + '<td style="padding:5px 8px;text-align:right">' + pctHtml + '</td>'
                 + '<td style="padding:5px 8px;text-align:right;white-space:nowrap">'
                 + '<button onclick="flipWatchStatus(' + pos.id + ', \\'open\\')" title="Move to Open Trades" style="margin:0;padding:3px 8px;font-size:11px;width:auto;background:#0d1f17;color:#00ff88;border:1px solid #00ff8855;border-radius:4px">→ Open</button>'
-                + ' <span style="cursor:pointer;color:#8b949e;font-size:18px;line-height:1;margin-left:6px" onclick="removePosition(' + pos.id + ')">×</span>'
+                + ' <button class="icon-x" aria-label="Remove ' + pos.ticker + '" onclick="removePosition(' + pos.id + ')">×</button>'
                 + '</td>'
                 + '</tr>';
             }});
@@ -2209,7 +2248,7 @@ async def home(request: Request):
               + '<td class="tnum" style="padding:5px 8px;text-align:right">' + pctHtml + '</td>'
               + '<td style="padding:5px 8px;text-align:right;white-space:nowrap">'
               + '<button onclick="flipWatchStatus(' + pos.id + ', \\'watching\\')" title="Move to Watching (closed the trade?)" style="margin:0;padding:3px 8px;font-size:11px;width:auto;background:#0d1622;color:#00d4ff;border:1px solid #00d4ff55;border-radius:4px">→ Watch</button>'
-              + ' <span style="cursor:pointer;color:#8b949e;font-size:18px;line-height:1;margin-left:6px" onclick="removePosition(' + pos.id + ')">×</span>'
+              + ' <button class="icon-x" aria-label="Remove ' + pos.ticker + '" onclick="removePosition(' + pos.id + ')">×</button>'
               + '</td>'
               + '</tr>';
           }});
@@ -2747,7 +2786,7 @@ async def home(request: Request):
                   + '<div style="display:flex;align-items:center;gap:4px">'
                   + '<span style="font-size:18px;font-weight:bold;color:'+color+'">$'+value+'</span>'
                   + b
-                  + '<button onclick="copyTP(\\''+value+'\\',this)" title="Copy" style="margin:0;padding:3px 6px;font-size:10px;background:#30363d;color:#8b949e;width:auto;border:1px solid #30363d;border-radius:4px">📋</button>'
+                  + '<button onclick="copyTP(\\''+value+'\\',this)" class="icon-mini-btn" title="Copy $'+value+'" aria-label="Copy $'+value+'">📋</button>'
                   + '</div></div>';
               }};
               const optWarn = (inst.indexOf('option')>-1 || inst==='calls' || inst==='puts')
@@ -3119,6 +3158,12 @@ async def home(request: Request):
         loadCorrelation();
         loadMonteCarlo();
         loadOptionsBudget();
+
+        // Accessibility: stamp aria-labels on repeated icon-only buttons that
+        // can't easily be hand-labeled in templates (e.g. one per section).
+        document.querySelectorAll('.help-btn').forEach(function(b) {{
+          if (!b.hasAttribute('aria-label')) b.setAttribute('aria-label', 'Help');
+        }});
       </script>
       <div class="quick-bar" id="quickBar">
         <span class="chip" onclick="quickAsk('SOXL signal today — RSI, MACD, and Kevin conviction?')">⚡ SOXL</span>
@@ -3132,7 +3177,7 @@ async def home(request: Request):
 
       <div class="modal-overlay" id="helpModal" onclick="if(event.target===this)closeHelp()">
         <div class="modal-box">
-          <button class="modal-close" onclick="closeHelp()">&#215;</button>
+          <button class="modal-close" onclick="closeHelp()" aria-label="Close help">&#215;</button>
           <div class="modal-title" id="helpTitle"></div>
           <div class="modal-section">
             <div class="modal-label">What it is</div>
