@@ -583,7 +583,7 @@ def build_trade_plan_html(plan):
         'font-size:11px;color:#8b949e;line-height:1.5;border:1px dashed #30363d">'
         '<b style="color:#c9d1d9">How to use:</b> Open Robinhood → place a limit buy at <b>Entry</b>. '
         'Once filled, set a stop-loss order at <b>Stop</b> and a limit sell at <b>Target</b> '
-        '(or a trailing stop). Then close the app. No exits, no entry.'
+        '(or a trailing stop). Then close the app. No exits, no second-guessing.'
         + (f'<br><span style="font-size:10px">Generated {ts}</span>' if ts else '')
         + '</div>'
     )
@@ -1793,6 +1793,103 @@ async def home(request: Request):
         @media(min-width:601px){{
           .grid{{grid-template-columns:1fr 1fr}}
         }}
+        /* ── Card window controls (collapse / size / hide / drag) ───────────
+           Per-card toolbar lives in the top-right corner. State is persisted
+           in localStorage per profile so each user gets their own layout. */
+        .card[data-card-id]{{padding-top:34px}}
+        .card-tools{{
+          position:absolute;top:8px;right:10px;display:flex;align-items:center;
+          gap:2px;z-index:5;opacity:.45;transition:opacity .15s;
+        }}
+        .card:hover .card-tools,.card-tools:focus-within{{opacity:1}}
+        .card-tools button{{
+          width:auto!important;margin:0;padding:3px 7px;font-size:12px;line-height:1;
+          background:transparent;color:var(--text-meta);border:1px solid transparent;
+          border-radius:6px;font-weight:normal;letter-spacing:0;text-transform:none;
+          font-family:var(--sans);box-shadow:none;cursor:pointer;
+          transition:color .15s,border-color .15s,background .15s
+        }}
+        .card-tools button:hover{{
+          color:var(--teal);border-color:var(--border-hot);
+          background:rgba(94,234,212,.05);box-shadow:none;filter:none
+        }}
+        .card-tools button:active{{transform:scale(.92)}}
+        .card-tools .ct-hide:hover{{color:var(--bear);border-color:var(--bear);background:rgba(248,113,113,.06)}}
+        .card-drag-handle{{
+          position:absolute;top:6px;left:10px;color:var(--text-meta);font-size:14px;
+          line-height:1;cursor:grab;opacity:.35;user-select:none;padding:4px 6px;
+          border-radius:4px;transition:opacity .15s,color .15s;letter-spacing:1px;
+        }}
+        .card:hover .card-drag-handle{{opacity:.8}}
+        .card-drag-handle:hover{{color:var(--teal);opacity:1}}
+        .card-drag-handle:active{{cursor:grabbing}}
+        /* Collapsed → hide everything except the controls */
+        .card.is-collapsed{{padding-top:34px;padding-bottom:8px;min-height:0}}
+        .card.is-collapsed > *:not(.card-tools):not(.card-drag-handle):not(.card-collapsed-title){{display:none!important}}
+        .card-collapsed-title{{
+          color:var(--text-soft);font-family:var(--serif);font-size:.95em;font-weight:500;
+          padding:2px 0 0 24px;letter-spacing:-.012em;display:none;
+        }}
+        .card.is-collapsed .card-collapsed-title{{display:block}}
+        /* Column-span sizing — works on the responsive grid. span-1 = half,
+           span-2 = single (current default for non-full), span-3 = full row. */
+        .dash > .card.span-1{{grid-column:span 1}}
+        .dash > .card.span-2{{grid-column:span 2}}
+        .dash > .card.span-3{{grid-column:1/-1}}
+        @media(max-width:700px){{
+          /* On 1-col mobile, span doesn't matter — everything is full width */
+          .dash > .card.span-1,.dash > .card.span-2,.dash > .card.span-3{{grid-column:1}}
+        }}
+        /* Drag feedback */
+        .card.is-dragging{{opacity:.4;transform:scale(.98)}}
+        .card.drag-over{{outline:2px dashed var(--teal);outline-offset:-4px}}
+        /* Floating Customize button — always visible, never hideable */
+        .customize-fab{{
+          position:fixed;bottom:18px;right:18px;z-index:150;
+          width:auto!important;margin:0;padding:11px 16px;font-size:13px;
+          background:rgba(22,27,34,.92);backdrop-filter:blur(12px);
+          -webkit-backdrop-filter:blur(12px);
+          color:var(--text-soft);border:1px solid var(--border-hot);
+          border-radius:24px;font-weight:500;letter-spacing:0;text-transform:none;
+          font-family:var(--sans);cursor:pointer;
+          box-shadow:0 6px 20px -6px rgba(0,0,0,.6);transition:.18s
+        }}
+        .customize-fab:hover{{
+          color:var(--teal);border-color:var(--teal);
+          background:rgba(22,27,34,.98);transform:translateY(-2px);
+          box-shadow:0 10px 26px -6px rgba(94,234,212,.25)
+        }}
+        @media(max-width:600px){{
+          .customize-fab{{bottom:78px;right:12px;padding:9px 13px;font-size:12px}}
+        }}
+        /* Customize modal — list of cards with show/hide + reset */
+        .cust-row{{
+          display:flex;align-items:center;gap:10px;padding:10px 8px;
+          border-bottom:1px solid var(--border);font-size:13px;
+        }}
+        .cust-row:last-child{{border-bottom:none}}
+        .cust-row .cust-name{{flex:1;color:var(--text);font-weight:500}}
+        .cust-row .cust-state{{color:var(--text-meta);font-size:11px;font-family:var(--mono)}}
+        .cust-row .cust-toggle{{
+          width:auto!important;margin:0;padding:5px 11px;font-size:11px;
+          border-radius:14px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;
+          font-family:var(--mono);box-shadow:none;background:#0d1117;color:var(--text-soft);
+          border:1px solid var(--border)
+        }}
+        .cust-row .cust-toggle.is-shown{{background:var(--teal-soft);color:var(--teal);border-color:var(--teal)}}
+        .cust-row .cust-toggle:hover{{filter:brightness(1.15);box-shadow:none}}
+        .cust-actions{{
+          display:flex;gap:8px;margin-top:14px;padding-top:14px;
+          border-top:1px solid var(--border);flex-wrap:wrap
+        }}
+        .cust-actions button{{
+          width:auto!important;margin:0;padding:8px 14px;font-size:12px;
+          background:#0d1117;color:var(--text-soft);border:1px solid var(--border);
+          border-radius:8px;font-weight:500;letter-spacing:0;text-transform:none;
+          font-family:var(--sans);box-shadow:none
+        }}
+        .cust-actions button:hover{{border-color:var(--teal);color:var(--teal);box-shadow:none;filter:none}}
+        .cust-actions .cust-danger:hover{{border-color:var(--bear);color:var(--bear)}}
       </style>
     </head>
     <body>
@@ -1808,7 +1905,7 @@ async def home(request: Request):
 
       <div class="dash">
 
-      <div class="card full">
+      <div class="card full" data-card-id="prices" data-card-title="Live Prices &amp; Session">
         {profile_bar}
         <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:8px">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -1827,7 +1924,7 @@ async def home(request: Request):
         <div style="margin-top:12px">{price_html or '<span class="meta">Live prices loading...</span>'}</div>
       </div>
 
-      <div class="card full" style="border-left:4px solid #00ff88">
+      <div class="card full" data-card-id="trade-plan" data-card-title="🎯 Trade Plan" style="border-left:4px solid #00ff88">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
           <h3 style="margin:0">🎯 Trade Plan <button class="help-btn" onclick="showHelp('trade-plan')">?</button></h3>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -1844,17 +1941,17 @@ async def home(request: Request):
         <div id="trade-plan-box">{trade_plan_html}</div>
       </div>
 
-      <div class="card full">
+      <div class="card full" data-card-id="track-record" data-card-title="📊 Kevin's Track Record">
         <h3>📊 Kevin's Track Record <button class="help-btn" onclick="showHelp('track-record')">?</button></h3>
         {track_html}
       </div>
 
-      <div class="card">
+      <div class="card" data-card-id="earnings" data-card-title="📅 Earnings Calendar">
         <h3>📅 Earnings Calendar <button class="help-btn" onclick="showHelp('earnings')">?</button></h3>
         {_earn_html}
       </div>
 
-      <div class="card">
+      <div class="card" data-card-id="position-sizing" data-card-title="📐 Position Sizing">
         <h3>📐 Position Sizing <button class="help-btn" onclick="showHelp('position-sizing')">?</button></h3>
         <div class="grid" style="gap:10px">
           <div>
@@ -1889,7 +1986,7 @@ async def home(request: Request):
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" data-card-id="ask-claude" data-card-title="🤖 Ask Claude">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
             <h3 style="margin:0">🤖 Ask Claude <button class="help-btn" onclick="showHelp('ask-claude')">?</button></h3>
             <button class="btn-sm" id="model-toggle" onclick="toggleAskModel()" title="Toggle Quality/Economy mode">⚡ Quality</button>
@@ -1905,7 +2002,7 @@ async def home(request: Request):
           </div>
           <div id="ans"></div>
         </div>
-        <div class="card">
+        <div class="card" data-card-id="analysis" data-card-title="📈 Latest Analysis">
           <h3>📈 Latest Analysis <button class="help-btn" onclick="showHelp('analysis')">?</button></h3>
           <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
             <button onclick="copyAnalysis()" style="width:auto;padding:5px 12px;font-size:12px;background:#30363d;color:#8b949e;margin:0">📋 Copy</button>
@@ -1913,7 +2010,7 @@ async def home(request: Request):
           <div class="analysis" id="analysisText">{analysis_html}</div>
         </div>
 
-      <div class="card">
+      <div class="card" data-card-id="news" data-card-title="📰 Ticker News">
         <h3>📰 Ticker News <button class="help-btn" onclick="showHelp('news')">?</button></h3>
         <div style="margin-bottom:10px">
           {news_badges}
@@ -1925,7 +2022,7 @@ async def home(request: Request):
         <div id="news-feed" style="font-size:13px;color:#8b949e">Click a ticker above to load news.</div>
       </div>
 
-      <div class="card">
+      <div class="card" data-card-id="watchlist" data-card-title="💼 Watchlist &amp; P&amp;L">
         <h3>💼 Watchlist &amp; P&amp;L <button class="help-btn" onclick="showHelp('watchlist')">?</button></h3>
         <div style="display:flex;gap:4px;margin-bottom:10px;border-bottom:1px solid var(--border)">
           <button id="wl-tab-open" class="tab-btn active" onclick="setWatchTab('open')">
@@ -1954,7 +2051,7 @@ async def home(request: Request):
         <div id="wl-total" style="margin-top:10px;font-size:14px;padding-top:8px;border-top:1px solid #30363d"></div>
       </div>
 
-      <div class="card">
+      <div class="card" data-card-id="rsi-macd" data-card-title="📉 RSI &amp; MACD">
         <h3>📉 RSI &amp; MACD <button class="help-btn" onclick="showHelp('rsi-macd')">?</button></h3>
         <div style="display:flex;gap:8px;margin-bottom:10px">
           <input type="text" id="ta-ticker" placeholder="SOXL" style="margin:0;flex:1;padding:8px"/>
@@ -1963,7 +2060,7 @@ async def home(request: Request):
         <div id="ta-result" style="font-size:13px;color:#8b949e">Enter a ticker and click Analyze.</div>
       </div>
 
-      <div class="card">
+      <div class="card" data-card-id="options-chain" data-card-title="📋 Options Chain">
         <h3>📋 Options Chain <button class="help-btn" onclick="showHelp('options-chain')">?</button></h3>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
           <input type="text" id="opt-ticker" placeholder="SOXL" style="width:90px;margin:0;padding:8px"/>
@@ -1973,7 +2070,7 @@ async def home(request: Request):
         <div id="opt-table" class="scroll-x" style="font-size:12px;color:#8b949e">Enter a ticker and click Load.</div>
       </div>
 
-      <div class="card full">
+      <div class="card full" data-card-id="regime" data-card-title="🌡️ Market Regime">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
           <h3 style="margin:0">🌡️ Market Regime <button class="help-btn" onclick="showHelp('regime')">?</button></h3>
           <button class="btn-sm" onclick="loadRegime()">↻ Refresh</button>
@@ -1994,7 +2091,7 @@ async def home(request: Request):
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" data-card-id="backtest" data-card-title="📊 Kevin's Call Backtest">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
             <h3 style="margin:0">📊 Kevin's Call Backtest <button class="help-btn" onclick="showHelp('backtest')">?</button></h3>
             <button class="btn-sm" onclick="loadBacktest()">↻ Refresh</button>
@@ -2002,7 +2099,7 @@ async def home(request: Request):
           <div id="backtest-display" style="color:#8b949e;font-size:13px">Loading...</div>
         </div>
 
-        <div class="card">
+        <div class="card" data-card-id="correlation" data-card-title="📡 Correlation &amp; Monte Carlo">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
             <h3 style="margin:0">📡 Correlation &amp; Monte Carlo <button class="help-btn" onclick="showHelp('correlation')">?</button></h3>
             <button class="btn-sm" onclick="loadCorrelation();loadMonteCarlo()">↻ Refresh</button>
@@ -2015,7 +2112,7 @@ async def home(request: Request):
           </div>
         </div>
 
-      <div class="card">
+      <div class="card" data-card-id="ai-sentiment" data-card-title="🧠 AI News Sentiment">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
             <h3 style="margin:0">🧠 AI News Sentiment <button class="help-btn" onclick="showHelp('ai-sentiment')">?</button></h3>
             <button class="btn-sm" onclick="loadNewsSentiment()">↻ Refresh</button>
@@ -2033,7 +2130,7 @@ async def home(request: Request):
           <div id="sent-display" style="color:#8b949e;font-size:13px">Click a ticker to score its news sentiment.</div>
         </div>
 
-        <div class="card">
+        <div class="card" data-card-id="rsi-zone" data-card-title="📐 RSI Zone Analysis">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
             <h3 style="margin:0">📐 RSI Zone Analysis <button class="help-btn" onclick="showHelp('rsi-zone')">?</button></h3>
             <button class="btn-sm" id="rsi-analysis-btn" onclick="loadRsiAnalysis()">Run Analysis</button>
@@ -3209,6 +3306,237 @@ async def home(request: Request):
         }}
         function closeHelp() {{ document.getElementById('helpModal').classList.remove('open'); }}
         document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') closeHelp(); }});
+      </script>
+
+      <!-- Floating Customize button — opens the layout manager -->
+      <button class="customize-fab" onclick="openCustomize()" aria-label="Customize dashboard layout">
+        ⚙️ Customize
+      </button>
+
+      <!-- Customize / restore-layout modal -->
+      <div class="modal-overlay" id="customizeModal" onclick="if(event.target===this)closeCustomize()">
+        <div class="modal-box" style="max-width:480px">
+          <button class="modal-close" onclick="closeCustomize()" aria-label="Close customize">&#215;</button>
+          <div class="modal-title">⚙️ Customize Dashboard</div>
+          <div class="modal-text" style="font-size:12px;color:#8b949e;margin-bottom:10px">
+            Show or hide cards, drag headers to reorder, click ⇲ on any card to cycle its size.
+          </div>
+          <div id="custList"></div>
+          <div class="cust-actions">
+            <button onclick="restoreAllCards()">↺ Show all</button>
+            <button class="cust-danger" onclick="resetCardLayout()">⟲ Reset layout</button>
+          </div>
+        </div>
+      </div>
+
+      <script>
+        // ── Card window-controls system ─────────────────────────────────────
+        // Every .card[data-card-id] gets a per-card toolbar (collapse, size,
+        // hide), a drag handle, and saves its state in localStorage scoped to
+        // the active profile. State shape:
+        //   {{ "<card-id>": {{ hidden:bool, collapsed:bool, span:1|2|3, order:int }} }}
+        (function() {{
+          const PID = "{pid}";
+          const STORAGE_KEY = 'card-state-v1-' + PID;
+          const SIZE_CYCLE = [1, 2, 3];           // half / single / full
+          const DEFAULT_SIZE = 2;                  // single column = current default
+          let state = {{}};
+          let dragId = null;
+
+          function load() {{
+            try {{ state = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{{}}'); }}
+            catch(e) {{ state = {{}}; }}
+            if (typeof state !== 'object' || state === null) state = {{}};
+          }}
+          function save() {{
+            try {{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }}
+            catch(e) {{}}
+          }}
+          function ensure(id) {{
+            if (!state[id]) state[id] = {{ hidden:false, collapsed:false, span:DEFAULT_SIZE, order:null }};
+            return state[id];
+          }}
+          function allCards() {{
+            return Array.from(document.querySelectorAll('.dash > .card[data-card-id]'));
+          }}
+
+          // Build the toolbar + drag handle for one card
+          function decorate(card) {{
+            const id    = card.dataset.cardId;
+            const title = card.dataset.cardTitle || id;
+            if (card.querySelector(':scope > .card-tools')) return;  // already done
+
+            // Drag handle (top-left)
+            const handle = document.createElement('div');
+            handle.className = 'card-drag-handle';
+            handle.title = 'Drag to reorder';
+            handle.setAttribute('aria-label', 'Drag to reorder');
+            handle.innerHTML = '⋮⋮';
+            handle.draggable = true;
+            handle.addEventListener('dragstart', function(e) {{
+              dragId = id;
+              card.classList.add('is-dragging');
+              try {{ e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move'; }} catch(_) {{}}
+            }});
+            handle.addEventListener('dragend', function() {{
+              card.classList.remove('is-dragging');
+              dragId = null;
+              allCards().forEach(c => c.classList.remove('drag-over'));
+            }});
+            card.addEventListener('dragover', function(e) {{
+              if (!dragId || dragId === id) return;
+              e.preventDefault();
+              card.classList.add('drag-over');
+            }});
+            card.addEventListener('dragleave', function() {{ card.classList.remove('drag-over'); }});
+            card.addEventListener('drop', function(e) {{
+              e.preventDefault();
+              card.classList.remove('drag-over');
+              if (!dragId || dragId === id) return;
+              reorderCard(dragId, id);
+            }});
+            card.appendChild(handle);
+
+            // Collapsed-state title (only visible when card is collapsed)
+            const ctitle = document.createElement('div');
+            ctitle.className = 'card-collapsed-title';
+            ctitle.innerHTML = title;
+            card.appendChild(ctitle);
+
+            // Toolbar (top-right)
+            const tools = document.createElement('div');
+            tools.className = 'card-tools';
+            tools.innerHTML =
+              '<button class="ct-collapse" title="Collapse / expand" aria-label="Collapse or expand card">─</button>' +
+              '<button class="ct-size" title="Cycle width: half / single / full" aria-label="Cycle card width">⇲</button>' +
+              '<button class="ct-hide" title="Hide card (restore from ⚙️ Customize)" aria-label="Hide card">×</button>';
+            tools.querySelector('.ct-collapse').onclick = function(e) {{ e.stopPropagation(); toggleCollapse(id); }};
+            tools.querySelector('.ct-size').onclick     = function(e) {{ e.stopPropagation(); cycleSize(id);     }};
+            tools.querySelector('.ct-hide').onclick     = function(e) {{ e.stopPropagation(); hideCard(id);      }};
+            card.appendChild(tools);
+          }}
+
+          function applyState() {{
+            const cards = allCards();
+            // Apply hidden / collapsed / span per card
+            cards.forEach(function(card) {{
+              const id = card.dataset.cardId;
+              const s  = ensure(id);
+              card.style.display = s.hidden ? 'none' : '';
+              card.classList.toggle('is-collapsed', !!s.collapsed);
+              card.classList.remove('span-1','span-2','span-3');
+              card.classList.add('span-' + (s.span || DEFAULT_SIZE));
+            }});
+            // Apply ordering — cards with an explicit order come first in that
+            // order, the rest keep their DOM order. Stable sort.
+            const dash = document.querySelector('.dash');
+            if (!dash) return;
+            const ordered = cards.slice().sort(function(a, b) {{
+              const sa = state[a.dataset.cardId] || {{}};
+              const sb = state[b.dataset.cardId] || {{}};
+              const oa = (sa.order == null) ? 9999 : sa.order;
+              const ob = (sb.order == null) ? 9999 : sb.order;
+              return oa - ob;
+            }});
+            ordered.forEach(function(card) {{ dash.appendChild(card); }});
+          }}
+
+          function toggleCollapse(id) {{
+            const s = ensure(id);
+            s.collapsed = !s.collapsed;
+            save(); applyState();
+          }}
+          function cycleSize(id) {{
+            const s = ensure(id);
+            const i = SIZE_CYCLE.indexOf(s.span || DEFAULT_SIZE);
+            s.span = SIZE_CYCLE[(i + 1) % SIZE_CYCLE.length];
+            save(); applyState();
+          }}
+          function hideCard(id) {{
+            const s = ensure(id);
+            s.hidden = true;
+            save(); applyState();
+            renderCustList();
+          }}
+          function showCard(id) {{
+            const s = ensure(id);
+            s.hidden = false;
+            save(); applyState();
+            renderCustList();
+          }}
+          function reorderCard(srcId, dstId) {{
+            // Pull current visual order, splice src to land before dst
+            const cards = allCards();
+            const ids = cards.map(c => c.dataset.cardId);
+            const srcIdx = ids.indexOf(srcId);
+            const dstIdx = ids.indexOf(dstId);
+            if (srcIdx < 0 || dstIdx < 0) return;
+            ids.splice(srcIdx, 1);
+            ids.splice(ids.indexOf(dstId), 0, srcId);
+            ids.forEach(function(id, i) {{ ensure(id).order = i; }});
+            save(); applyState();
+          }}
+
+          // ── Customize modal rendering ─────────────────────────────────────
+          function renderCustList() {{
+            const list = document.getElementById('custList');
+            if (!list) return;
+            const cards = allCards();
+            // Render in current order so it matches what they see
+            const ordered = cards.slice().sort(function(a, b) {{
+              const oa = (state[a.dataset.cardId] || {{}}).order;
+              const ob = (state[b.dataset.cardId] || {{}}).order;
+              return ((oa == null) ? 9999 : oa) - ((ob == null) ? 9999 : ob);
+            }});
+            list.innerHTML = '';
+            ordered.forEach(function(card) {{
+              const id    = card.dataset.cardId;
+              const title = card.dataset.cardTitle || id;
+              const s     = ensure(id);
+              const row   = document.createElement('div');
+              row.className = 'cust-row';
+              const stateLabel = s.hidden
+                ? 'hidden'
+                : (s.collapsed ? 'collapsed · ' : '') + 'span-' + (s.span || DEFAULT_SIZE);
+              row.innerHTML =
+                '<div class="cust-name">' + title + '</div>' +
+                '<div class="cust-state">' + stateLabel + '</div>' +
+                '<button class="cust-toggle ' + (s.hidden ? '' : 'is-shown') + '">' +
+                  (s.hidden ? 'Show' : 'Shown') +
+                '</button>';
+              row.querySelector('button').onclick = function() {{
+                if (s.hidden) showCard(id); else hideCard(id);
+              }};
+              list.appendChild(row);
+            }});
+          }}
+
+          window.openCustomize = function() {{
+            renderCustList();
+            document.getElementById('customizeModal').classList.add('open');
+          }};
+          window.closeCustomize = function() {{
+            document.getElementById('customizeModal').classList.remove('open');
+          }};
+          window.restoreAllCards = function() {{
+            Object.keys(state).forEach(function(id) {{ state[id].hidden = false; }});
+            save(); applyState(); renderCustList();
+          }};
+          window.resetCardLayout = function() {{
+            if (!confirm('Reset all card sizes, order, and visibility to default?')) return;
+            state = {{}};
+            save(); applyState(); renderCustList();
+          }};
+
+          document.addEventListener('keydown', function(e) {{
+            if (e.key === 'Escape') closeCustomize();
+          }});
+
+          // Init
+          load();
+          allCards().forEach(decorate);
+          applyState();
+        }})();
       </script>
     </body>
     </html>"""
