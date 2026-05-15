@@ -1157,12 +1157,10 @@ def get_backtest_data():
             actual_returns.append(max(-40.0, min(40.0, ret)))
         else:
             actual_returns.append(12.0 if r["outcome"] == "HIT" else -6.0)
-    all_hit_exp = [r["expected_return"] for r in actionable
-                   if r["outcome"] == "HIT" and r["expected_return"] is not None]
     hit_count = sum(1 for r in actionable if r["outcome"] == "HIT")
     summary = {
         "avg_return":       round(sum(actual_returns) / len(actual_returns), 1) if actual_returns else 0,
-        "best":             round(max(all_hit_exp), 1) if all_hit_exp else 0,
+        "best":             round(max(actual_returns), 1) if actual_returns else 0,
         "worst":            round(min(actual_returns), 1) if actual_returns else 0,
         "hit_rate":         round(hit_count / len(actionable) * 100) if actionable else 0,
         "trade_count":      len(actionable),
@@ -2638,10 +2636,22 @@ async def home(request: Request):
               document.getElementById('news-feed').innerText = 'No news found for ' + ticker;
               return;
             }}
+            // Stale-news flag: anything published >7 days ago gets a yellow badge,
+            // >30 days gets a red one. Polygon doesn't index ETF news heavily so
+            // tickers like SOXL routinely return weeks-old articles.
+            const ageBadge = function(pub) {{
+              if (!pub) return '';
+              const t = Date.parse(pub.replace(' ','T') + 'Z');
+              if (isNaN(t)) return '';
+              const days = Math.floor((Date.now() - t) / 86400000);
+              if (days <= 7)  return '';
+              if (days <= 30) return ' <span style="background:#3a2f0d;color:#ffd700;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:bold;margin-left:6px">⚠ ' + days + 'd old</span>';
+              return ' <span style="background:#3a1010;color:#ff6b6b;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:bold;margin-left:6px">🛑 STALE · ' + days + 'd</span>';
+            }};
             document.getElementById('news-feed').innerHTML = d.news.map(n => `
               <div style="border-bottom:1px solid #30363d;padding:10px 0">
                 <a href="${{n.url}}" target="_blank" style="color:#00d4ff;text-decoration:none;font-weight:bold;font-size:13px">${{n.title}}</a>
-                <div style="color:#8b949e;font-size:11px;margin-top:3px">${{n.source}} &nbsp;·&nbsp; ${{n.published}}</div>
+                <div style="color:#8b949e;font-size:11px;margin-top:3px">${{n.source}} &nbsp;·&nbsp; ${{n.published}}${{ageBadge(n.published)}}</div>
                 <div style="color:#c9d1d9;font-size:12px;margin-top:4px">${{n.summary}}</div>
               </div>`).join('');
           }} catch(e) {{ document.getElementById('news-feed').innerText = 'Error: ' + e.message; }}
