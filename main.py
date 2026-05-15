@@ -408,7 +408,7 @@ def build_track_record_html(trades):
         # ── Filter row ───────────────────────────────────────────────────────
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'
         '<input type="text" id="tr-search" placeholder="🔍 Ticker or call…" '
-        'style="margin:0;padding:7px 10px;font-size:13px;width:160px" '
+        'style="margin:0;padding:9px 10px;font-size:16px;width:170px" '
         'oninput="filterTrackRecord()"/>'
         '<button class="tr-tab active" id="tr-tab-all"  onclick="setTRTab(\'ALL\')">All</button>'
         '<button class="tr-tab"        id="tr-tab-hit"  onclick="setTRTab(\'HIT\')">✅ HIT</button>'
@@ -1567,8 +1567,8 @@ async def home(request: Request):
            the visual stays small but the tap zone expands to ≥44×44 via an
            invisible ::after. Mouse users don't notice; mobile users stop
            missing taps. */
-        .help-btn,.modal-close,.icon-x,.icon-mini-btn{{position:relative}}
-        .help-btn::after,.modal-close::after,.icon-x::after,.icon-mini-btn::after{{
+        .help-btn,.modal-close,.icon-x,.icon-mini-btn,.card-tools button,.card-drag-handle{{position:relative}}
+        .help-btn::after,.modal-close::after,.icon-x::after,.icon-mini-btn::after,.card-tools button::after,.card-drag-handle::after{{
           content:"";position:absolute;
           top:50%;left:50%;width:44px;height:44px;
           transform:translate(-50%,-50%);
@@ -1800,6 +1800,11 @@ async def home(request: Request):
           gap:2px;z-index:5;opacity:.45;transition:opacity .15s;
         }}
         .card:hover .card-tools,.card-tools:focus-within{{opacity:1}}
+        /* Touch devices have no hover — keep controls fully visible. */
+        @media(hover:none){{
+          .card-tools{{opacity:1}}
+          .card-drag-handle{{opacity:.85}}
+        }}
         .card-tools button{{
           width:auto!important;margin:0;padding:3px 7px;font-size:12px;line-height:1;
           background:transparent;color:var(--text-meta);border:1px solid transparent;
@@ -1876,6 +1881,14 @@ async def home(request: Request):
         }}
         .cust-row .cust-toggle.is-shown{{background:var(--teal-soft);color:var(--teal);border-color:var(--teal)}}
         .cust-row .cust-toggle:hover{{filter:brightness(1.15);box-shadow:none}}
+        .cust-row .cust-move{{
+          width:auto!important;margin:0;padding:6px 9px;font-size:14px;line-height:1;
+          background:#0d1117;color:var(--text-soft);border:1px solid var(--border);
+          border-radius:6px;font-weight:normal;letter-spacing:0;text-transform:none;
+          font-family:var(--sans);box-shadow:none;cursor:pointer;flex-shrink:0
+        }}
+        .cust-row .cust-move:hover:not([disabled]){{border-color:var(--teal);color:var(--teal);box-shadow:none;filter:none}}
+        .cust-row .cust-move[disabled]{{opacity:.3;cursor:not-allowed}}
         .cust-actions{{
           display:flex;gap:8px;margin-top:14px;padding-top:14px;
           border-top:1px solid var(--border);flex-wrap:wrap
@@ -1966,7 +1979,7 @@ async def home(request: Request):
             <div class="meta" style="margin-bottom:4px">Entry Price ($)</div>
             <div style="display:flex;gap:6px">
               <input type="number" id="ps-entry" placeholder="22.50" step="0.01" oninput="calcPosition()" style="margin:0;flex:1"/>
-              <input type="text"   id="ps-fill-ticker" placeholder="SOXL" style="margin:0;width:70px;padding:8px;font-size:13px"/>
+              <input type="text"   id="ps-fill-ticker" placeholder="SOXL" style="margin:0;width:80px;padding:10px;font-size:16px"/>
               <button onclick="fillEntryFromPrice()" style="margin:0;width:50px;padding:8px;font-size:12px">Fill</button>
             </div>
           </div>
@@ -2031,9 +2044,9 @@ async def home(request: Request):
           </button>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
-          <input type="text"   id="wl-ticker" placeholder="Ticker"  style="margin:0;width:75px;padding:8px;font-size:13px"/>
-          <input type="number" id="wl-size"   placeholder="Qty"     style="margin:0;width:65px;padding:8px;font-size:13px" min="0" step="1"/>
-          <input type="number" id="wl-entry"  placeholder="Entry $" style="margin:0;width:85px;padding:8px;font-size:13px" step="0.01"/>
+          <input type="text"   id="wl-ticker" placeholder="Ticker"  style="margin:0;width:90px;padding:10px;font-size:16px"/>
+          <input type="number" id="wl-size"   placeholder="Qty"     style="margin:0;width:80px;padding:10px;font-size:16px" min="0" step="1"/>
+          <input type="number" id="wl-entry"  placeholder="Entry $" style="margin:0;width:100px;padding:10px;font-size:16px" step="0.01"/>
           <select id="wl-type" style="padding:9px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;font-size:13px">
             <option value="stock">Shares</option>
             <option value="option">Contracts ×100</option>
@@ -3486,6 +3499,19 @@ async def home(request: Request):
             ids.forEach(function(id, i) {{ ensure(id).order = i; }});
             save(); applyState();
           }}
+          // Touch-friendly reorder — drag-and-drop is unreliable on iOS, so the
+          // Customize panel exposes ↑/↓ buttons that step a card by one slot.
+          function moveCard(id, delta) {{
+            const cards = allCards();
+            const ids = cards.map(c => c.dataset.cardId);
+            const idx = ids.indexOf(id);
+            const dst = idx + delta;
+            if (idx < 0 || dst < 0 || dst >= ids.length) return;
+            ids.splice(idx, 1);
+            ids.splice(dst, 0, id);
+            ids.forEach(function(cid, i) {{ ensure(cid).order = i; }});
+            save(); applyState(); renderCustList();
+          }}
 
           // ── Customize modal rendering ─────────────────────────────────────
           function renderCustList() {{
@@ -3499,7 +3525,7 @@ async def home(request: Request):
               return ((oa == null) ? 9999 : oa) - ((ob == null) ? 9999 : ob);
             }});
             list.innerHTML = '';
-            ordered.forEach(function(card) {{
+            ordered.forEach(function(card, idx) {{
               const id    = card.dataset.cardId;
               const title = card.dataset.cardTitle || id;
               const s     = ensure(id);
@@ -3508,15 +3534,25 @@ async def home(request: Request):
               const stateLabel = s.hidden
                 ? 'hidden'
                 : (s.collapsed ? 'collapsed · ' : '') + 'span-' + (s.span || DEFAULT_SIZE);
+              const upDisabled   = (idx === 0)                  ? 'disabled' : '';
+              const downDisabled = (idx === ordered.length - 1) ? 'disabled' : '';
               row.innerHTML =
+                '<button class="cust-move" data-act="up"   title="Move up"   aria-label="Move up"   ' + upDisabled   + '>↑</button>' +
+                '<button class="cust-move" data-act="down" title="Move down" aria-label="Move down" ' + downDisabled + '>↓</button>' +
                 '<div class="cust-name">' + title + '</div>' +
                 '<div class="cust-state">' + stateLabel + '</div>' +
                 '<button class="cust-toggle ' + (s.hidden ? '' : 'is-shown') + '">' +
                   (s.hidden ? 'Show' : 'Shown') +
                 '</button>';
-              row.querySelector('button').onclick = function() {{
-                if (s.hidden) showCard(id); else hideCard(id);
-              }};
+              row.querySelectorAll('button').forEach(function(b) {{
+                const act = b.dataset.act;
+                b.onclick = function() {{
+                  if (act === 'up')        moveCard(id, -1);
+                  else if (act === 'down') moveCard(id,  1);
+                  else if (s.hidden)       showCard(id);
+                  else                     hideCard(id);
+                }};
+              }});
               list.appendChild(row);
             }});
           }}
