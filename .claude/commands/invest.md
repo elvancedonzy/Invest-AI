@@ -59,7 +59,8 @@ Elvis is building a fully automated AI investment research platform on a self-ho
 | ANTHROPIC_API_KEY | sk-ant-... | API pod + Analyzer |
 | ALPACA_API_KEY | PKV... | API pod |
 | ALPACA_SECRET_KEY | HQX... | API pod |
-| TRADIER_TOKEN | W9g... | API pod (sandbox) |
+| TRADIER_TOKEN | 4A5... | API pod + Analyzer (live brokerage) |
+| FINNHUB_KEY | d87... | API pod + Analyzer (earnings calendar) |
 | POLYGON_API_KEY | ZEv... | API pod |
 | DISCORD_TOKEN | MTQ... | Discord fetcher |
 | DISCORD_CHANNEL_ID | 132... | Discord fetcher |
@@ -105,7 +106,7 @@ Monthly estimate: ~$4-15 depending on Ask Claude usage. Use Economy mode (💰 b
 7. Ticker News (Polygon, last 5 headlines per ticker)
 8. Watchlist & Live P&L (SQLite `users.db`, per-user, green/red P&L)
 9. RSI & MACD (60 daily bars from Alpaca, client-side calc)
-10. Options Chain (Tradier sandbox — simulated prices)
+10. Options Chain (Tradier live — real strikes, bid/ask, OI)
 11. Market Regime (SPY 50/200MA + vol → BULL/NEUTRAL/CHOPPY/BEAR/CRASH)
 12. Kevin's Call Backtest (entry→target expected return, hit rate, scrollable table)
 13. Correlation & Monte Carlo (SOXL/QQQ rolling Pearson + 1,000 sim signal strength)
@@ -216,11 +217,10 @@ git push
 
 ## Known Issues
 
-1. **Tradier sandbox** — options prices are simulated. Upgrade to Tradier brokerage for live data.
-2. **track_record.txt** — maintained manually. More entries = better Backtest + Monte Carlo.
-3. **Earnings dates are estimates** — period-end + ~45 days. Verify at earnings.com before trading.
-4. **secrets.yaml** — never commit. If pushed accidentally, rotate all API keys immediately.
-5. **GITHUB_TOKEN** — token shared in chat must be regenerated at github.com → Settings → Developer Settings → PATs.
+1. **track_record.txt** — maintained manually. More entries = better Backtest + Monte Carlo.
+2. **secrets.yaml** — never commit. If pushed accidentally, rotate all API keys immediately. `kubectl apply -f secrets.yaml` replaces the whole Secret — keep the file complete or live keys get dropped.
+3. **GITHUB_TOKEN** — token shared in chat must be regenerated at github.com → Settings → Developer Settings → PATs.
+4. **FOMC/CPI calendars are hardcoded** in `macro.py` — populate next year's dates each Q4 when Fed/BLS publishes.
 
 ---
 
@@ -230,6 +230,5 @@ git push
 |-------|-------|
 | 5 | HTTPS/SSL via cert-manager + Traefik |
 | 5 | Architecture README with diagram |
-| 6 | Tradier live brokerage (user action) |
 | 6 | Alpaca paper trade execution (auto-buy based on Top 3 Actions) |
 | 7 | PWA — add to home screen on iPhone as native app |

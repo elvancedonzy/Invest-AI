@@ -424,6 +424,22 @@ def build_track_record_html(trades):
         '</div>'
     )
 
+def _parse_report_date(filename):
+    """Pull the date out of 'Alpha Report M-D-YYYY.txt' → date object or None."""
+    if not filename:
+        return None
+    m = re.search(r"(\d{1,2})-(\d{1,2})-(\d{4})", filename)
+    if not m:
+        return None
+    try:
+        return datetime(int(m.group(3)), int(m.group(1)), int(m.group(2))).date()
+    except ValueError:
+        return None
+
+def _et_today():
+    """Eastern Time today — Kevin posts ~9:22 AM ET so UTC-4 keeps us aligned."""
+    return (datetime.utcnow() - timedelta(hours=4)).date()
+
 def build_trade_plan_html(plan):
     """Render the phone-friendly Trade Plan card. Each trade gets entry/stop/target
     fields with one-tap copy buttons so the user can read off → type into Robinhood."""
@@ -442,6 +458,23 @@ def build_trade_plan_html(plan):
             ts = datetime.fromisoformat(ts).strftime("%b %d %H:%M")
         except Exception:
             ts = ts[:16].replace("T", " ")
+
+    # Stale-plan banner — fires if today's report hasn't been posted yet.
+    stale_banner = ""
+    report_date = _parse_report_date(plan.get("report"))
+    today_et    = _et_today()
+    if report_date and report_date < today_et:
+        days_stale = (today_et - report_date).days
+        pretty = report_date.strftime("%b %d")
+        stale_banner = (
+            '<div style="margin-bottom:10px;padding:10px 12px;background:#2a1f0d;'
+            'border-left:3px solid #ff9800;border-radius:6px;font-size:12px;color:#ffd700">'
+            f'⚠️ This plan is from <b>{pretty}</b> — Kevin hasn\'t posted today\'s '
+            f'report yet ({days_stale} day{"s" if days_stale != 1 else ""} stale). '
+            'Trades below are from a prior session; spot prices may have drifted '
+            'significantly. Verify before entering.'
+            '</div>'
+        )
 
     cards = []
     for i, t in enumerate(plan["trades"][:5]):
@@ -472,6 +505,53 @@ def build_trade_plan_html(plan):
                 'border-left:3px solid #ff9800;border-radius:4px;font-size:11px;color:#ffd700">'
                 '⚠️ Options — set a calendar reminder for the mid-DTE check; '
                 'theta will start biting around then.'
+                '</div>'
+            )
+
+        # Earnings warning — written by analyzer.validate_trade_plan when a trade
+        # is within 7 days of a confirmed earnings report. Conviction was already
+        # downgraded; the badge here makes the risk visible at glance.
+        earn_warn = ""
+        ew = t.get("earnings_warning")
+        if isinstance(ew, dict) and ew.get("days_away") is not None:
+            ed = ew.get("next_date", "?")
+            try:
+                ed = datetime.fromisoformat(ed).strftime("%b %d")
+            except Exception:
+                pass
+            timing_s = f" {ew['timing']}" if ew.get("timing") else ""
+            src_s = " (confirmed)" if ew.get("source") == "finnhub" else " (estimated)"
+            earn_warn = (
+                '<div style="margin-top:6px;padding:8px 10px;background:#3a1e1e;'
+                'border-left:3px solid #ff6b6b;border-radius:4px;font-size:12px;color:#ff9999">'
+                f'⚠️ EARNINGS in {ew["days_away"]}d ({ed}{timing_s}){src_s} — '
+                'conviction was downgraded. Holding through earnings can move ±5–20% '
+                'overnight; IV crush will gut options even on a winning move.'
+                '</div>'
+            )
+
+        # Macro warning — FOMC/CPI within 2d or VIX > 30. Plan-wide signal but
+        # rendered per trade for visibility.
+        macro_warn = ""
+        mw = t.get("macro_warning")
+        if isinstance(mw, dict):
+            sev   = mw.get("severity", "")
+            evs   = mw.get("events") or []
+            vix   = mw.get("vix")
+            parts = []
+            for e in evs:
+                parts.append(f"{e.get('type','?')} {e.get('date','')} (in {e.get('days_away','?')}d)")
+            if vix is not None:
+                parts.append(f"VIX {vix:.1f}")
+            summary = " · ".join(parts) if parts else sev.upper()
+            border  = "#ff6b6b" if sev == "crisis" else "#ff9800"
+            bg      = "#3a1e1e" if sev == "crisis" else "#2a1f0d"
+            color   = "#ff9999" if sev == "crisis" else "#ffd700"
+            macro_warn = (
+                f'<div style="margin-top:6px;padding:8px 10px;background:{bg};'
+                f'border-left:3px solid {border};border-radius:4px;font-size:12px;color:{color}">'
+                f'⚠️ MACRO {sev.upper()}: {summary} — conviction was downgraded. '
+                'Events of this size routinely move SPY ±1–3% in minutes.'
                 '</div>'
             )
 
@@ -573,6 +653,8 @@ def build_trade_plan_html(plan):
             f'<div style="font-size:12px;color:#8b949e;line-height:1.5">'
             f'<b style="color:#c9d1d9">Horizon:</b> {horizon} &nbsp;·&nbsp; {rationale}'
             '</div>'
+            + earn_warn
+            + macro_warn
             + inst_warn
             + opt_block
             + '</div>'
@@ -588,7 +670,7 @@ def build_trade_plan_html(plan):
         + '</div>'
     )
 
-    return "".join(cards) + footer
+    return stale_banner + "".join(cards) + footer
 
 @app.get("/pick-profile", response_class=HTMLResponse)
 async def pick_profile():
@@ -1039,9 +1121,15 @@ def build_earnings_context():
             return ""
         parts = []
         for e in items:
-            days = e.get("days_away")
-            warn = " ⚠️ SOON" if days is not None and days <= 14 else ""
-            parts.append(f"  {e['ticker']}: ~{e['next_date']} ({days}d away){warn}")
+            days   = e.get("days_away")
+            timing = e.get("timing") or ""
+            src    = (e.get("source") or "").lower()
+            prefix = "" if src == "finnhub" else "~"  # ~ flags estimate fallback
+            warn = " ⚠️ SOON" if days is not None and 0 <= days <= 7 else \
+                   " ⚠️ within 14d" if days is not None and days <= 14 else ""
+            timing_s = f" {timing}" if timing else ""
+            parts.append(f"  {e['ticker']}: {prefix}{e['next_date']}{timing_s} "
+                         f"({days}d away){warn}")
         return "\n".join(parts)
     except Exception:
         return ""
@@ -1461,11 +1549,12 @@ async def home(request: Request):
             '<tr>'
             + "".join(
                 '<th style="text-align:' + al + ';padding:4px 8px;color:#8b949e;border-bottom:1px solid #30363d">' + h + '</th>'
-                for h, al in [("Ticker","left"),("Last Quarter","left"),("EPS","right"),
-                               ("Next Report (est)","left"),("Days","right")]
+                for h, al in [("Ticker","left"),("Next Report","left"),
+                              ("Timing","left"),("Days","right")]
             ) +
             '</tr>'
         )
+        any_estimate = False
         for e in _earnings:
             da = e["days_away"]
             if da is not None and da <= 7:
@@ -1477,17 +1566,36 @@ async def home(request: Request):
             else:
                 date_col = e["next_date"]
                 day_badge = ('<span class="meta">' + str(da) + 'd</span>') if da is not None else '<span class="meta">—</span>'
+
+            src = (e.get("source") or "").lower()
+            if src == "finnhub":
+                src_badge = '<span style="color:#00ff88;font-size:10px;margin-left:4px">●live</span>'
+            elif src == "estimate":
+                src_badge = '<span style="color:#8b949e;font-size:10px;margin-left:4px">~est</span>'
+                any_estimate = True
+            else:
+                src_badge = ''
+            timing = e.get("timing") or ""
+            timing_cell = (
+                '<span style="background:#30363d;color:#c9d1d9;padding:1px 6px;'
+                'border-radius:6px;font-size:10px;font-weight:bold">' + timing + '</span>'
+            ) if timing else '<span class="meta">—</span>'
+
             _earn_html += (
                 '<tr>'
                 '<td style="padding:5px 8px;font-weight:bold;color:#00d4ff">' + e["ticker"] + '</td>'
-                '<td style="padding:5px 8px;color:#8b949e">' + e["last_period"] + '</td>'
-                '<td style="padding:5px 8px;text-align:right;color:#c9d1d9">' + e["last_eps"] + '</td>'
-                '<td style="padding:5px 8px">' + date_col
-                + ' <span style="color:#8b949e;font-size:10px">~est</span></td>'
+                '<td style="padding:5px 8px">' + date_col + src_badge + '</td>'
+                '<td style="padding:5px 8px">' + timing_cell + '</td>'
                 '<td style="padding:5px 8px;text-align:right">' + day_badge + '</td>'
                 '</tr>'
             )
-        _earn_html += '</table></div><div class="meta" style="font-size:11px;margin-top:6px">Dates are estimates (filing date +91d or period end +45d). Verify at earnings.com before trading.</div>'
+        footer_note = (
+            'BMO=before market open, AMC=after market close. '
+            '●live = real confirmed date (Finnhub).'
+        )
+        if any_estimate:
+            footer_note += ' ~est = fallback estimate; verify at earnings.com.'
+        _earn_html += '</table></div><div class="meta" style="font-size:11px;margin-top:6px">' + footer_note + '</div>'
 
     _news_tickers = ['SPY','QQQ','SOXL','META','MSFT','MRVL','TSLA','AXON','RKT']
     news_badges = "".join(
@@ -3722,67 +3830,56 @@ async def health():
 
 FISCAL_PERIOD_ENDS = {"Q1": (3, 31), "Q2": (6, 30), "Q3": (9, 30), "Q4": (12, 31)}
 
+CORE_EARNINGS_TICKERS = ["SPY", "QQQ", "NVDA", "META", "MSFT", "TSLA"]
+
+def _earnings_ticker_universe():
+    """Union of core + every ticker in any watchlist + latest trade plan."""
+    tickers = set(CORE_EARNINGS_TICKERS)
+    try:
+        with get_db() as con:
+            for r in con.execute("SELECT DISTINCT ticker FROM watchlist").fetchall():
+                if r and r[0]:
+                    tickers.add(r[0].upper())
+    except Exception:
+        pass
+    try:
+        plan = get_latest_trade_plan() or {}
+        for t in plan.get("trades") or []:
+            tk = str(t.get("ticker", "")).upper().strip()
+            if tk:
+                tickers.add(tk)
+    except Exception:
+        pass
+    return sorted(tickers)
+
 def get_earnings_calendar():
-    from datetime import timedelta
-    key = os.getenv("POLYGON_API_KEY")
-    if not key:
-        return []
-    stock_tickers = ["META", "MSFT", "TSLA", "MRVL", "AXON", "RKT"]
+    """Real earnings dates for every ticker the system currently touches.
+    Routes through earnings.py (Finnhub primary, Polygon estimate fallback)."""
+    from earnings import fetch_real_earnings
     today = datetime.utcnow().date()
     results = []
-    for ticker in stock_tickers:
+    for ticker in _earnings_ticker_universe():
         try:
-            r = requests.get(
-                "https://api.polygon.io/vX/reference/financials",
-                params={"ticker": ticker, "limit": 1, "timeframe": "quarterly",
-                        "order": "desc", "apiKey": key},
-                timeout=5
-            )
-            items = r.json().get("results", [])
-            if not items:
+            e = fetch_real_earnings(ticker)
+            if not e:
                 continue
-            latest = items[0]
-            fiscal   = latest.get("fiscal_period", "")
-            fy       = int(latest.get("fiscal_year", 0) or 0)
-            filing   = latest.get("filing_date")
-            eps_raw  = (latest.get("financials") or {}).get("income_statement", {}) \
-                             .get("basic_earnings_per_share", {}).get("value")
-            eps_str  = f"${round(eps_raw, 2):+.2f}" if eps_raw is not None else "—"
-
-            # Estimate next report: prefer actual filing_date + 91 days;
-            # fall back to inferring period end from fiscal label + 45 days
-            if filing:
-                next_date = datetime.strptime(filing, "%Y-%m-%d").date() + timedelta(days=91)
-                source = "est"
-            elif fiscal in FISCAL_PERIOD_ENDS and fy:
-                m, d = FISCAL_PERIOD_ENDS[fiscal]
-                period_end = datetime(fy, m, d).date()
-                # If that period end is in the past use next fiscal year's equivalent
-                if period_end < today - timedelta(days=180):
-                    period_end = datetime(fy + 1, m, d).date()
-                next_date = period_end + timedelta(days=45)
-                source = "est"
-            else:
-                next_date = None
-                source = "unknown"
-
-            # Advance past estimates forward by quarters until the date is upcoming
-            if next_date:
-                while next_date < today:
-                    next_date += timedelta(days=91)
-            days_away = (next_date - today).days if next_date else None
+            try:
+                nd = datetime.strptime(e["next_date"], "%Y-%m-%d").date()
+            except Exception:
+                continue
             results.append({
-                "ticker":      ticker,
-                "last_period": f"{fiscal} {fy}" if fy else fiscal,
-                "last_eps":    eps_str,
-                "next_date":   next_date.strftime("%b %d") if next_date else "unknown",
-                "next_full":   next_date.isoformat() if next_date else None,
-                "days_away":   days_away,
-                "source":      source,
+                "ticker":    ticker,
+                "next_date": nd.strftime("%b %d"),
+                "next_full": nd.isoformat(),
+                "days_away": e.get("days_away"),
+                "timing":    e.get("timing", ""),
+                "source":    e.get("source", ""),
             })
         except Exception:
-            pass
-    return sorted(results, key=lambda x: (x["days_away"] is None, x["days_away"] or 999))
+            continue
+    return sorted(results,
+                  key=lambda x: (x["days_away"] is None,
+                                 999 if x["days_away"] is None else x["days_away"]))
 
 @app.get("/earnings")
 async def earnings():
@@ -3850,15 +3947,44 @@ async def options_chain(request: Request, ticker: str = "SOXL", expiration: str 
            summary=f"{len(result.get('calls',[]))} calls, {len(result.get('puts',[]))} puts")
     return {"ticker": ticker, "expiration": expiration, **result}
 
+BARS_CACHE_PATH = "/reports/bars_cache.json"
+BARS_CACHE_TTL_SECS = 3600  # 1h — fresh enough for intraday RSI/MACD shifts
+
+def _load_bars_cache():
+    try:
+        with open(BARS_CACHE_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_bars_cache(cache):
+    try:
+        with open(BARS_CACHE_PATH, "w") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+
 @app.get("/bars")
 async def bars_with_log(request: Request, ticker: str = "SOXL", limit: int = 60):
     pid = current_profile_id(request)
+    cache_key = f"{ticker.upper()}:{limit}"
+    cache = _load_bars_cache()
+    entry = cache.get(cache_key)
+    now_ts = datetime.utcnow().timestamp()
+    if entry and (now_ts - entry.get("cached_ts", 0)) < BARS_CACHE_TTL_SECS:
+        result = entry.get("payload")
+        if result:
+            bars = result.get("bars") or []
+            if bars:
+                db_log(pid, "rsi", ticker=ticker,
+                       summary=f"last close ${bars[-1].get('c', 0)} (cache)")
+            return result
+
     key    = os.getenv("ALPACA_API_KEY")
     secret = os.getenv("ALPACA_SECRET_KEY")
     if not key:
         return {"error": "ALPACA_API_KEY not configured"}
     try:
-        from datetime import timedelta
         start = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%d")
         r = requests.get(
             f"https://data.alpaca.markets/v2/stocks/{ticker}/bars",
@@ -3874,6 +4000,9 @@ async def bars_with_log(request: Request, ticker: str = "SOXL", limit: int = 60)
         if raw:
             last_close = raw[-1].get("c", 0)
             db_log(pid, "rsi", ticker=ticker, summary=f"last close ${last_close}")
+            # Only cache responses with actual bar data
+            cache[cache_key] = {"payload": result, "cached_ts": now_ts}
+            _save_bars_cache(cache)
         return result
     except Exception as e:
         return {"error": str(e)}

@@ -272,6 +272,11 @@ spec:
             secretKeyRef:
               name: invest-ai-secrets
               key: ALPACA_SECRET_KEY
+        - name: FINNHUB_KEY
+          valueFrom:
+            secretKeyRef:
+              name: invest-ai-secrets
+              key: FINNHUB_KEY
         volumeMounts:
         - name: reports
           mountPath: /reports

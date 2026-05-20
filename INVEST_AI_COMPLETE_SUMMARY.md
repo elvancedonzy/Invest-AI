@@ -33,9 +33,10 @@ A fully automated AI-powered investment research platform that:
 | Storage | Synology NFS share → VM → pods |
 | AI Brain | Claude Sonnet 4.6 (interactive), Claude Haiku 4.5 (background) |
 | Market Data | Alpaca Markets API (live prices, historical bars) |
-| Options Data | Tradier API (sandbox) |
+| Options Data | Tradier API (live brokerage — real bid/ask/OI) |
 | News | Polygon API |
-| Earnings | Polygon financials API |
+| Earnings | Finnhub `/calendar/earnings` (confirmed dates); Polygon estimate as fallback |
+| Macro | FOMC/CPI hardcoded calendars + VIX via Yahoo Finance |
 | Web Framework | FastAPI + Uvicorn |
 | Database | SQLite at `/reports/users.db` (on Synology NFS) |
 | Notifications | Home Assistant mobile push |
@@ -67,7 +68,8 @@ A fully automated AI-powered investment research platform that:
 | ANTHROPIC_API_KEY | sk-ant-... | API pod, Analyzer pod |
 | ALPACA_API_KEY | PKV... | API pod |
 | ALPACA_SECRET_KEY | HQX... | API pod |
-| TRADIER_TOKEN | W9g... | API pod (sandbox) |
+| TRADIER_TOKEN | 4A5... | API pod + Analyzer (live brokerage) |
+| FINNHUB_KEY | d87... | API pod + Analyzer (earnings calendar) |
 | POLYGON_API_KEY | ZEv... | API pod |
 | DISCORD_TOKEN | MTQ... | Discord fetcher pod |
 | DISCORD_CHANNEL_ID | 132... | Discord fetcher pod |
@@ -190,7 +192,7 @@ A fully automated AI-powered investment research platform that:
 - Visual RSI bar with 30/70 oversold/overbought markers
 
 ### 9. Options Chain
-- Tradier sandbox API (prices are simulated — verify in your broker before trading)
+- Tradier live brokerage API (real strikes, real bid/ask, real volume, real OI)
 - Shows calls (green) and puts (red) side by side
 - Strike, Bid, Ask, Volume, Open Interest
 - Expiry date picker loads automatically
@@ -308,21 +310,21 @@ curl http://192.168.1.201:30080/analysis-status
 
 ## ⚠️ Known Issues / Notes
 
-1. **Tradier token is sandbox** — options prices are simulated, not live. To get real options data, upgrade to a Tradier brokerage account and update the `TRADIER_TOKEN` secret.
-2. **track_record.txt** — must be maintained manually. Add a line each time Kevin makes a specific call. The more data, the better Claude's context.
-3. **SSH to VM blocked** — SSH from this PC to `oem@192.168.1.201` fails (key not configured). Use kubectl privileged pods instead for host-level operations.
-4. **Earnings dates are estimates** — Polygon quarterly financials don't always have filing dates. Dates are calculated as period-end + ~45 days. Always verify before trading around earnings.
-5. **secrets.yaml contains plaintext keys** — Never commit to git. If this file is ever shared, rotate all API keys immediately.
+1. **track_record.txt** — must be maintained manually. Add a line each time Kevin makes a specific call. The more data, the better Claude's context.
+2. **SSH to VM blocked** — SSH from this PC to `oem@192.168.1.201` fails (key not configured). Use kubectl privileged pods instead for host-level operations.
+3. **secrets.yaml contains plaintext keys** — Never commit to git. If this file is ever shared, rotate all API keys immediately. `kubectl apply -f secrets.yaml` replaces the whole Secret; keep the file complete or live keys (HA_URL/HA_TOKEN/HA_NOTIFY_SERVICE) get dropped.
+4. **FOMC/CPI calendars hardcoded** in `macro.py` — populate each Q4 when Fed/BLS publishes next year's schedule.
 
 ---
 
 ## 🚀 Next Steps / Planned Features
 
 ### Phase 3 — Smart Features
-- [ ] Upgrade Tradier to live account for real options pricing
+- [x] Upgrade Tradier to live account for real options pricing — **done**
+- [x] Real earnings dates (Finnhub) — **done**
+- [x] Macro gate (FOMC/CPI/VIX) on trade-plan validator — **done**
 - [ ] Build Kevin's track_record.txt backfill from existing 91 reports
 - [ ] RSI/MACD weekend historical analysis across all tickers
-- [ ] Earnings earnings whisper integration (more accurate dates)
 
 ### Phase 4 — Dashboard
 - [ ] Grafana panels for portfolio performance

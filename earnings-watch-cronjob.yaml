@@ -26,21 +26,29 @@ spec:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: POLYGON_API_KEY
+            - name: FINNHUB_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: FINNHUB_KEY
             - name: HA_URL
               valueFrom:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: HA_URL
+                  optional: true
             - name: HA_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: HA_TOKEN
+                  optional: true
             - name: HA_NOTIFY_SERVICE
               valueFrom:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: HA_NOTIFY_SERVICE
+                  optional: true
             volumeMounts:
             - name: reports
               mountPath: /reports

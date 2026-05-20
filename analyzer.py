@@ -680,8 +680,9 @@ def calculate_sentiment_delta(reports):
     }
 
 # ── Earnings Alert ───────────────────────────────────────────────────────────
-
-WATCHED_TICKERS = ["META", "MSFT", "TSLA", "MRVL", "AXON", "RKT", "SOXL", "QQQ", "NVDA"]
+# Core list is just a baseline — the actual check unions in watchlist tickers
+# and routes through earnings.py (Finnhub primary, Polygon estimate fallback).
+WATCHED_TICKERS = ["SPY", "QQQ", "NVDA", "META", "MSFT", "TSLA"]
 
 def get_watchlist_tickers_from_db():
     """Return distinct uppercase tickers from the SQLite watchlist."""
@@ -696,42 +697,47 @@ def get_watchlist_tickers_from_db():
         print(f"Watchlist DB read error: {e}")
         return []
 
-def check_upcoming_earnings():
-    """Return list of tickers with earnings within 7 days. Includes hardcoded
-    watch list AND any tickers users have in their SQLite watchlist."""
-    key = os.getenv("POLYGON_API_KEY")
-    if not key:
+def get_trade_plan_tickers_from_disk():
+    """Return distinct uppercase tickers from the most recent trade plan JSON.
+    Catches tickers Kevin recommended but the user hasn't added to a watchlist."""
+    try:
+        files = glob.glob(os.path.join(RESULTS_DIR, "*_trade_plan.json"))
+        if not files:
+            return []
+        latest = max(files, key=os.path.getmtime)
+        with open(latest, "r", errors="ignore") as f:
+            plan = json.load(f)
+        return [str(t.get("ticker", "")).upper() for t in (plan.get("trades") or [])
+                if t.get("ticker")]
+    except Exception:
         return []
+
+def check_upcoming_earnings():
+    """Return list of tickers with earnings within 7 days. Unions:
+       core watch list + SQLite watchlist + latest trade-plan tickers.
+       Routes through earnings.fetch_real_earnings (Finnhub primary)."""
+    from earnings import fetch_real_earnings
+    tickers = sorted(
+        set(WATCHED_TICKERS)
+        | set(get_watchlist_tickers_from_db())
+        | set(get_trade_plan_tickers_from_disk())
+    )
     alerts = []
-    today  = datetime.utcnow().date()
-    tickers = sorted(set(WATCHED_TICKERS) | set(get_watchlist_tickers_from_db()))
     for ticker in tickers:
         try:
-            r = requests.get(
-                f"https://api.polygon.io/vX/reference/financials",
-                params={"ticker": ticker, "limit": 1, "sort": "period_of_report_date",
-                        "order": "desc", "apiKey": key},
-                timeout=8
-            )
-            results = r.json().get("results", [])
-            if not results:
+            e = fetch_real_earnings(ticker)
+            if not e or e.get("days_away") is None:
                 continue
-            last = results[0]
-            period_end = last.get("end_date", "")
-            if not period_end:
-                continue
-            # Estimate next report: period_end + 45 days
-            from datetime import date
-            pe = date.fromisoformat(period_end)
-            next_report = pe + timedelta(days=45)
-            days_away   = (next_report - today).days
-            if 0 <= days_away <= 7:
+            if 0 <= e["days_away"] <= 7:
                 alerts.append({
-                    "ticker": ticker,
-                    "next_date": str(next_report),
-                    "days_away": days_away,
+                    "ticker":    ticker,
+                    "next_date": e["next_date"],
+                    "days_away": e["days_away"],
+                    "timing":    e.get("timing", ""),
+                    "source":    e.get("source", ""),
                 })
-        except Exception:
+        except Exception as ex:
+            print(f"  Earnings check failed for {ticker}: {ex}")
             continue
     return alerts
 
@@ -1037,6 +1043,65 @@ def validate_trade_plan(plan, live_prices, *, entry_tolerance_pct=2.0,
         rr = reward / risk
         if rr < min_rr:
             rejected.append(f"{ticker}: R:R {rr:.2f} < {min_rr} — dropped"); continue
+
+        # Earnings gate — annotate + downgrade conviction if reporting ≤ 7d out.
+        # Kevin's call still ships, but the dashboard renders a loud warning
+        # and the HIGH-cap loop below sees the downgrade.
+        try:
+            from earnings import fetch_real_earnings
+            e = fetch_real_earnings(ticker)
+            if e and e.get("days_away") is not None and 0 <= e["days_away"] <= 7:
+                t["earnings_warning"] = {
+                    "days_away": e["days_away"],
+                    "next_date": e["next_date"],
+                    "timing":    e.get("timing", ""),
+                    "source":    e.get("source", ""),
+                }
+                conv = str(t.get("conviction", "")).upper()
+                if conv == "HIGH":
+                    t["conviction"] = "MEDIUM"
+                elif conv == "MEDIUM-HIGH":
+                    t["conviction"] = "MEDIUM"
+                rejected.append(
+                    f"{ticker}: earnings in {e['days_away']}d "
+                    f"({e['next_date']} {e.get('timing','')}) — "
+                    "kept with warning, conviction downgraded"
+                )
+        except Exception as _ex:
+            print(f"  Earnings gate failed for {ticker}: {_ex}")
+
+        # Macro gate — FOMC/CPI within 2d or elevated VIX downgrades conviction.
+        # Plan-wide signal (events + VIX) applied per trade because conviction
+        # lives on each trade. VIX > 40 is a crisis-regime hard-drop.
+        try:
+            from macro import check_macro_risk
+            risk = check_macro_risk()
+            sev  = risk.get("severity", "clear")
+            if sev != "clear":
+                w = {"severity": sev, "events": risk.get("events", []),
+                     "vix": risk.get("vix")}
+                t["macro_warning"] = w
+                if sev == "crisis":
+                    rejected.append(
+                        f"{ticker}: VIX {risk['vix']:.1f} >40 (crisis regime) — dropped"
+                    )
+                    continue
+                conv = str(t.get("conviction", "")).upper()
+                if conv == "HIGH":
+                    t["conviction"] = "MEDIUM-HIGH"
+                elif conv == "MEDIUM-HIGH":
+                    t["conviction"] = "MEDIUM"
+                elif conv == "MEDIUM":
+                    t["conviction"] = "MEDIUM-LOW"
+                ev_summary = (
+                    ", ".join(f"{e['type']} in {e['days_away']}d" for e in w["events"])
+                    or f"VIX {risk['vix']:.1f}"
+                )
+                rejected.append(
+                    f"{ticker}: macro {sev} ({ev_summary}) — conviction downgraded"
+                )
+        except Exception as _ex:
+            print(f"  Macro gate failed for {ticker}: {_ex}")
 
         # Always strip model-generated options blocks. The deterministic
         # attach_options_companions() step replaces them with real Tradier

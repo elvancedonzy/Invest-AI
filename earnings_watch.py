@@ -5,14 +5,11 @@ Runs independently of the Alpha Report analyzer so the user gets a morning
 heads-up even on days when Kevin doesn't post a report.
 """
 import os, sqlite3, requests
-from datetime import datetime, timedelta, date
+from datetime import datetime
+
+from earnings import fetch_real_earnings
 
 DB_PATH = "/reports/users.db"
-
-FISCAL_PERIOD_ENDS = {
-    "Q1": (3, 31), "Q2": (6, 30), "Q3": (9, 30), "Q4": (12, 31),
-    "FY": (12, 31),
-}
 
 
 def get_watchlist_tickers():
@@ -25,7 +22,6 @@ def get_watchlist_tickers():
             "FROM watchlist w JOIN profiles p ON w.profile_id = p.id"
         ).fetchall()
         con.close()
-        # group by ticker → set of users
         out = {}
         for ticker, user in rows:
             if not ticker:
@@ -35,44 +31,6 @@ def get_watchlist_tickers():
     except Exception as e:
         print(f"Watchlist DB read error: {e}")
         return {}
-
-
-def estimate_next_earnings(ticker, polygon_key):
-    """Return (next_date, days_away) or (None, None)."""
-    try:
-        r = requests.get(
-            "https://api.polygon.io/vX/reference/financials",
-            params={"ticker": ticker, "limit": 1,
-                    "sort": "period_of_report_date", "order": "desc",
-                    "apiKey": polygon_key},
-            timeout=8,
-        )
-        items = r.json().get("results", [])
-        if not items:
-            return None, None
-        latest = items[0]
-        fiscal = latest.get("fiscal_period", "")
-        fy     = int(latest.get("fiscal_year", 0) or 0)
-        filing = latest.get("filing_date")
-        today  = datetime.utcnow().date()
-
-        if filing:
-            next_date = datetime.strptime(filing, "%Y-%m-%d").date() + timedelta(days=91)
-        elif fiscal in FISCAL_PERIOD_ENDS and fy:
-            m, d = FISCAL_PERIOD_ENDS[fiscal]
-            period_end = date(fy, m, d)
-            if period_end < today - timedelta(days=180):
-                period_end = date(fy + 1, m, d)
-            next_date = period_end + timedelta(days=45)
-        else:
-            return None, None
-
-        while next_date < today:
-            next_date += timedelta(days=91)
-        return next_date, (next_date - today).days
-    except Exception as e:
-        print(f"Polygon error for {ticker}: {e}")
-        return None, None
 
 
 def notify_home_assistant(alerts):
@@ -88,7 +46,8 @@ def notify_home_assistant(alerts):
     lines = ["⚠️ Earnings within 7 days for your watchlist:"]
     for a in alerts:
         users = ", ".join(sorted(a["users"]))
-        lines.append(f"• {a['ticker']} — in {a['days_away']}d ({a['next_date']}) [{users}]")
+        timing = f" {a['timing']}" if a.get("timing") else ""
+        lines.append(f"• {a['ticker']} — in {a['days_away']}d ({a['next_date']}{timing}) [{users}]")
     lines.append("")
     lines.append("Consider exiting before the report. Open dashboard to review.")
     body = "\n".join(lines)
@@ -107,10 +66,6 @@ def notify_home_assistant(alerts):
 
 def main():
     print(f"Earnings watch started at {datetime.now()}")
-    polygon_key = os.getenv("POLYGON_API_KEY")
-    if not polygon_key:
-        print("POLYGON_API_KEY not set — aborting")
-        return
 
     tickers = get_watchlist_tickers()
     if not tickers:
@@ -120,15 +75,16 @@ def main():
 
     alerts = []
     for ticker, users in tickers.items():
-        next_date, days_away = estimate_next_earnings(ticker, polygon_key)
-        if next_date is None:
+        e = fetch_real_earnings(ticker)
+        if not e or e.get("days_away") is None:
             continue
-        print(f"  {ticker}: next ~{next_date} ({days_away}d)")
-        if 0 <= days_away <= 7:
+        print(f"  {ticker}: next {e['next_date']} ({e['days_away']}d, {e.get('source','?')})")
+        if 0 <= e["days_away"] <= 7:
             alerts.append({
                 "ticker":    ticker,
-                "next_date": next_date.strftime("%b %d"),
-                "days_away": days_away,
+                "next_date": datetime.strptime(e["next_date"], "%Y-%m-%d").strftime("%b %d"),
+                "days_away": e["days_away"],
+                "timing":    e.get("timing", ""),
                 "users":     users,
             })
 

@@ -41,6 +41,11 @@ spec:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: TRADIER_TOKEN
+            - name: FINNHUB_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: invest-ai-secrets
+                  key: FINNHUB_KEY
             - name: OPTIONS_BUDGET
               value: "500"
             - name: HA_URL
@@ -48,16 +53,19 @@ spec:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: HA_URL
+                  optional: true
             - name: HA_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: HA_TOKEN
+                  optional: true
             - name: HA_NOTIFY_SERVICE
               valueFrom:
                 secretKeyRef:
                   name: invest-ai-secrets
                   key: HA_NOTIFY_SERVICE
+                  optional: true
             volumeMounts:
             - name: reports
               mountPath: /reports

@@ -47,7 +47,7 @@ A fully automated AI-powered investment research platform. It reads daily Alpha 
 6. Ask Claude (91 reports + prices + track record context, quick chips)
 7. Latest Analysis (10-section breakdown, auto-refresh every 5 min)
 8. RSI & MACD Indicators (60 daily bars from Alpaca, client-side calc)
-9. Options Chain (Tradier sandbox — prices simulated, not live)
+9. Options Chain (Tradier live — real strikes, bid/ask, OI)
 10. Ticker News (Polygon API, last 5 headlines)
 11. Multi-User Profiles (Netflix-style picker, 24 emoji avatars, per-profile SQLite)
 
@@ -71,13 +71,18 @@ ssh oem@192.168.1.201 "sudo mount -t nfs 192.168.1.224:'/volume4/CE UNION/alpha-
 ```
 
 ## Known Issues
-1. **Tradier token is sandbox** — options prices simulated. Upgrade to Tradier brokerage for live data.
-2. **track_record.txt** — maintained manually. Add a line each time Kevin makes a call.
-3. **Earnings dates are estimates** — calculated as period-end + ~45 days. Always verify before trading.
-4. **secrets.yaml** — never commit. If accidentally pushed, rotate all API keys immediately.
+1. **track_record.txt** — maintained manually. Add a line each time Kevin makes a call.
+2. **secrets.yaml** — never commit. If accidentally pushed, rotate all API keys immediately. `kubectl apply -f secrets.yaml` replaces the whole Secret — keep the file complete (HA_URL/HA_TOKEN/HA_NOTIFY_SERVICE if you want HA push notifications) or those keys will be dropped from the live cluster.
+
+## Earnings & macro gates (live)
+- **Real earnings dates**: `earnings.py` queries Finnhub for confirmed report dates with BMO/AMC timing. Falls back to Polygon estimate if Finnhub misses. 6h disk cache at `/reports/earnings_cache.json`.
+- **Earnings gate**: `analyzer.py:validate_trade_plan` annotates `earnings_warning` and downgrades conviction (HIGH→MEDIUM, MEDIUM-HIGH→MEDIUM) when any recommended ticker reports within 7 days.
+- **Macro gate**: `macro.py` adds FOMC/CPI calendar awareness (2026 dates hardcoded; update annually) and VIX via Yahoo Finance. VIX > 40 hard-drops trades, > 30 downgrades, FOMC/CPI within 2d downgrades.
+- **Stale-plan banner**: dashboard renders an amber warning on the trade-plan card when Kevin hasn't posted today's report.
+- **Bars cache**: `/bars` caches Alpaca daily bars at `/reports/bars_cache.json`, 1h TTL.
 
 ## Planned Next Steps
-- Phase 3: Tradier live account, track_record backfill from 91 reports, RSI/MACD weekend history
+- Phase 3: track_record backfill from 91 reports, RSI/MACD weekend history
 - Phase 4: Grafana portfolio panels, Home Assistant dashboard card, earnings notifications
 - Phase 5: HTTPS/SSL, CI/CD auto-deploy on git push
 
