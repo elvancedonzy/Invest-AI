@@ -2015,10 +2015,16 @@ async def home(request: Request):
       <h1>📊 Invest AI</h1>
 
       <div id="historyPanel" style="display:none;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:15px;margin-bottom:15px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <h3 style="color:#00d4ff;font-size:14px">📋 Your Recent Activity</h3>
-          <button onclick="toggleHistory()" class="icon-x" aria-label="Close history panel">×</button>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap">
+          <h3 style="color:#00d4ff;font-size:14px;margin:0">📋 Your Recent Activity <span id="historyCount" class="meta" style="font-size:11px;font-weight:normal"></span></h3>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button onclick="exportHistoryCSV()" class="btn-sm" style="width:auto;margin:0;padding:5px 10px;font-size:11px;background:#0d1117;color:#8b949e;border:1px solid #30363d">↓ CSV</button>
+            <button onclick="toggleHistory()" class="icon-x" aria-label="Close history panel">×</button>
+          </div>
         </div>
+        <input id="historySearch" type="search" placeholder="Search activity (ticker, question, action)…"
+               oninput="renderHistory(this.value)"
+               style="width:100%;padding:8px 10px;margin-bottom:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e6edf3;font-size:13px"/>
         <div id="historyContent" style="font-size:12px;color:#8b949e;max-height:420px;overflow-y:auto"></div>
       </div>
 
@@ -2522,50 +2528,98 @@ async def home(request: Request):
           if (arrow)   arrow.innerText = open ? '▾' : '▴';
         }}
 
+        // In-memory cache of the last fetched history. Search/export work
+        // off this array — no refetch needed once the panel is open.
+        let _histItems = [];
+
         async function toggleHistory() {{
           const panel = document.getElementById('historyPanel');
           if (panel.style.display === 'none') {{
             panel.style.display = 'block';
-            const r = await fetch('/my-history?limit=50');
-            const items = await r.json();
-            if (!items.length) {{
-              document.getElementById('historyContent').innerHTML =
-                '<span class="meta">No activity yet.</span>';
-              return;
-            }}
-            const icons = {{options:'📋',news:'📰',rsi:'📉',bars:'📉',ask:'🤖',prices:'💰',watchlist:'💼'}};
-            document.getElementById('historyContent').innerHTML = items.map(function(h) {{
-              const ic       = icons[h.action] || '•';
-              const hasDetail = h.query || h.summary;
-              return '<div style="padding:6px 0;border-bottom:1px solid #21262d;cursor:'
-                + (hasDetail ? 'pointer' : 'default') + '"'
-                + (hasDetail ? ' onclick="toggleHistItem(this)"' : '') + '>'
-                // ── Header row ──────────────────────────────────────────────
-                + '<div style="display:flex;align-items:center;gap:6px;justify-content:space-between">'
-                + '<div>'
-                + '<span style="color:#8b949e;font-size:11px">' + h.created_at.slice(0,16) + '</span> '
-                + ic + ' <b style="color:#e6edf3;font-size:12px">' + h.action.toUpperCase() + '</b>'
-                + (h.ticker ? ' <span style="color:#00d4ff;font-size:12px">' + h.ticker + '</span>' : '')
-                + '</div>'
-                + (hasDetail ? '<span class="hist-arrow" style="color:#8b949e;font-size:11px;flex-shrink:0">▾</span>' : '')
-                + '</div>'
-                // ── Preview (one-line, shown by default) ────────────────────
-                + (h.query ? '<div class="hist-preview" style="color:#c9d1d9;font-size:11px;'
-                  + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;padding-left:4px">'
-                  + h.query + '</div>' : '')
-                // ── Full detail (hidden until clicked) ──────────────────────
-                + (hasDetail ? '<div class="hist-detail" style="display:none;margin-top:8px;'
-                  + 'padding:8px;background:#0d1117;border-radius:6px;border:1px solid #21262d">'
-                  + (h.query ? '<div style="color:#00d4ff;font-size:12px;font-weight:bold;margin-bottom:6px">Q: '
-                    + h.query + '</div>' : '')
-                  + (h.summary ? '<div style="color:#c9d1d9;font-size:12px;line-height:1.7;white-space:pre-wrap">'
-                    + h.summary + '</div>' : '')
-                  + '</div>' : '')
-                + '</div>';
-            }}).join('');
+            const r = await fetch('/my-history?limit=200');
+            _histItems = await r.json();
+            const search = document.getElementById('historySearch');
+            if (search) search.value = '';
+            renderHistory('');
           }} else {{
             panel.style.display = 'none';
           }}
+        }}
+
+        function renderHistory(filter) {{
+          const box   = document.getElementById('historyContent');
+          const count = document.getElementById('historyCount');
+          if (!_histItems.length) {{
+            box.innerHTML = '<span class="meta">No activity yet.</span>';
+            if (count) count.textContent = '';
+            return;
+          }}
+          const q = (filter || '').toLowerCase().trim();
+          const items = q ? _histItems.filter(function(h) {{
+            return (h.action  || '').toLowerCase().includes(q)
+                || (h.ticker  || '').toLowerCase().includes(q)
+                || (h.query   || '').toLowerCase().includes(q)
+                || (h.summary || '').toLowerCase().includes(q)
+                || (h.created_at || '').toLowerCase().includes(q);
+          }}) : _histItems;
+          if (count) count.textContent = q
+            ? '(' + items.length + ' of ' + _histItems.length + ')'
+            : '(' + _histItems.length + ' entries)';
+          if (!items.length) {{
+            box.innerHTML = '<span class="meta">No matches for "' + filter + '".</span>';
+            return;
+          }}
+          const icons = {{options:'📋',news:'📰',rsi:'📉',bars:'📉',ask:'🤖',prices:'💰',watchlist:'💼'}};
+          box.innerHTML = items.map(function(h) {{
+            const ic       = icons[h.action] || '•';
+            const hasDetail = h.query || h.summary;
+            return '<div style="padding:6px 0;border-bottom:1px solid #21262d;cursor:'
+              + (hasDetail ? 'pointer' : 'default') + '"'
+              + (hasDetail ? ' onclick="toggleHistItem(this)"' : '') + '>'
+              + '<div style="display:flex;align-items:center;gap:6px;justify-content:space-between">'
+              + '<div>'
+              + '<span style="color:#8b949e;font-size:11px">' + h.created_at.slice(0,16) + '</span> '
+              + ic + ' <b style="color:#e6edf3;font-size:12px">' + h.action.toUpperCase() + '</b>'
+              + (h.ticker ? ' <span style="color:#00d4ff;font-size:12px">' + h.ticker + '</span>' : '')
+              + '</div>'
+              + (hasDetail ? '<span class="hist-arrow" style="color:#8b949e;font-size:11px;flex-shrink:0">▾</span>' : '')
+              + '</div>'
+              + (h.query ? '<div class="hist-preview" style="color:#c9d1d9;font-size:11px;'
+                + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;padding-left:4px">'
+                + h.query + '</div>' : '')
+              + (hasDetail ? '<div class="hist-detail" style="display:none;margin-top:8px;'
+                + 'padding:8px;background:#0d1117;border-radius:6px;border:1px solid #21262d">'
+                + (h.query ? '<div style="color:#00d4ff;font-size:12px;font-weight:bold;margin-bottom:6px">Q: '
+                  + h.query + '</div>' : '')
+                + (h.summary ? '<div style="color:#c9d1d9;font-size:12px;line-height:1.7;white-space:pre-wrap">'
+                  + h.summary + '</div>' : '')
+                + '</div>' : '')
+              + '</div>';
+          }}).join('');
+        }}
+
+        function exportHistoryCSV() {{
+          if (!_histItems.length) {{ alert('No history to export.'); return; }}
+          // RFC-4180 quoting: wrap in double quotes, double any internal quotes.
+          const esc = function(v) {{
+            const s = (v == null ? '' : String(v));
+            return '"' + s.replace(/"/g, '""') + '"';
+          }};
+          const header = ['timestamp','action','ticker','query','summary'];
+          const lines  = [header.join(',')];
+          _histItems.forEach(function(h) {{
+            lines.push([h.created_at, h.action, h.ticker, h.query, h.summary].map(esc).join(','));
+          }});
+          const blob = new Blob([lines.join('\\r\\n')], {{type: 'text/csv;charset=utf-8'}});
+          const url  = URL.createObjectURL(blob);
+          const a    = document.createElement('a');
+          const today = new Date().toISOString().slice(0,10);
+          a.href = url;
+          a.download = 'invest_ai_history_' + today + '.csv';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
         }}
 
         loadWatchlist();
