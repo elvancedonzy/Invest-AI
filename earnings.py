@@ -40,12 +40,17 @@ def _save_cache(cache):
 
 def _fetch_finnhub(ticker):
     """Real confirmed earnings via Finnhub /calendar/earnings.
-    Returns (next_date: date | None, timing: str)."""
+    Returns (next_date: date | None, timing: str, responded: bool).
+    `responded=True` means the API call succeeded (even if upcoming list is empty).
+    Callers should only fall back to estimates when `responded=False`."""
     key = os.getenv("FINNHUB_KEY")
     if not key:
-        return None, ""
+        return None, "", False
     today = date.today()
-    horizon = today + timedelta(days=90)
+    # Wider 365d horizon — earnings that just reported still appear in the
+    # response (with epsActual populated); we filter those out below. A 90d
+    # window misses tickers whose next quarter hasn't been scheduled yet.
+    horizon = today + timedelta(days=365)
     try:
         r = requests.get(
             "https://finnhub.io/api/v1/calendar/earnings",
@@ -53,8 +58,12 @@ def _fetch_finnhub(ticker):
                     "symbol": ticker.upper(), "token": key},
             timeout=8,
         )
+        if r.status_code != 200:
+            return None, "", False
         data = r.json() or {}
-        items = data.get("earningsCalendar") or []
+        items = data.get("earningsCalendar")
+        if items is None:
+            return None, "", False
         upcoming = []
         for it in items:
             d = it.get("date")
@@ -64,16 +73,21 @@ def _fetch_finnhub(ticker):
                 ed = datetime.strptime(d, "%Y-%m-%d").date()
             except Exception:
                 continue
-            if ed >= today:
-                upcoming.append((ed, str(it.get("hour", "") or "").lower()))
+            # Strict future-only filter. If `epsActual` is populated the event
+            # has already reported, even if the date is technically today.
+            if ed < today:
+                continue
+            if ed == today and it.get("epsActual") is not None:
+                continue
+            upcoming.append((ed, str(it.get("hour", "") or "").lower()))
         if not upcoming:
-            return None, ""
+            return None, "", True  # API responded, no upcoming events
         upcoming.sort(key=lambda x: x[0])
         ed, hour = upcoming[0]
         timing = "BMO" if hour == "bmo" else "AMC" if hour == "amc" else ""
-        return ed, timing
+        return ed, timing, True
     except Exception:
-        return None, ""
+        return None, "", False
 
 
 def _fetch_estimate(ticker):
@@ -142,9 +156,15 @@ def fetch_real_earnings(ticker):
         else:
             return None  # cached negative result
 
-    nd, timing = _fetch_finnhub(ticker)
-    source = "finnhub" if nd else ""
-    if not nd:
+    nd, timing, finnhub_ok = _fetch_finnhub(ticker)
+    if nd:
+        source = "finnhub"
+    elif finnhub_ok:
+        # Finnhub responded successfully but has no upcoming earnings for this
+        # ticker (typically because next quarter hasn't been scheduled yet).
+        # That's truthful — don't paper over with a guess.
+        source = ""
+    else:
         nd = _fetch_estimate(ticker)
         source = "estimate" if nd else ""
         timing = ""
